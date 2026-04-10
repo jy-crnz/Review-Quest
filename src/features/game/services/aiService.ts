@@ -1,7 +1,8 @@
-import { QuizQuestionSchema, type QuizQuestion } from '@/lib/schemas';
+import { QuizQuestionSchema, type QuizQuestion, LevelSchema, DungeonDataSchema, type DungeonData } from '@/lib/schemas';
 import { QuizType } from '@/features/game/store';
 import OpenAI from "openai";
 import { z } from "zod";
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Service Layer: OpenRouter Intelligence Integration
@@ -16,22 +17,7 @@ const openai = new OpenAI({
     }
 });
 
-const AIResponseSchema = z.object({
-    subject: z.string(),
-    bossName: z.string(),
-    bossQuote: z.string(),
-    missionBriefing: z.string(),
-    afterActionReport: z.object({
-        victory: z.string(),
-        defeat: z.string()
-    }),
-    questions: z.array(z.object({
-        q: z.string(),
-        options: z.array(z.string()),
-        correctIdx: z.number(),
-        explanation: z.string()
-    }))
-});
+const AIResponseSchema = DungeonDataSchema;
 
 export type GeneratedBattle = z.infer<typeof AIResponseSchema>;
 
@@ -50,42 +36,44 @@ export const generateBossBattle = async (
 
     // TACTICAL INSTRUCTION MAPPING
     const typeInstructions = {
-        'multiple-choice': "Generate 15 challenging Multiple Choice questions. Provide exactly 4 options per question. Randomize the position of the correct answer (correctIdx should not always be 0).",
-        'true-false': "Generate 15 True/False questions. The 'options' array must be strictly ['True', 'False', '', '']. Use index 0 for True and 1 for False. DO NOT move the correct answer to the first position; the 'options' array must stay in this exact order.",
-        'enumeration': "Generate 15 Identification/Term questions. Provide the exact correct term as one option and 3 plausible but incorrect distractors. Randomize the position of the correct answer (correctIdx should not always be 0)."
+        'multiple-choice': "Generate 5 challenging Multiple Choice questions per level. Provide exactly 4 options per question. Randomize the position of the correct answer (correctIdx should not always be 0).",
+        'true-false': "Generate 5 True/False questions per level. The 'options' array must be strictly ['True', 'False', '', '']. Use index 0 for True and 1 for False. DO NOT move the correct answer to the first position; the 'options' array must stay in this exact order.",
+        'enumeration': "Generate 5 Identification/Term questions per level. Provide the exact correct term as one option and 3 plausible but incorrect distractors. Randomize the position of the correct answer (correctIdx should not always be 0)."
     };
 
     try {
         const prompt = `
             You are the "Master of Intel" in a gamified learning RPG. 
-            Transform the provided study material into a legendary Boss Battle.
+            Transform the provided study material into a Dungeon Level Structure based on uploaded files.
             
             CHALLENGE MODE: ${quizType.toUpperCase()}
             
             TASK: 
-            1. Identify the academic subject.
-            2. Create a creative Boss Name based on the subject.
-            3. Write a short, intimidating "Encounter Taunt".
-            4. Write a "missionBriefing" (2-3 sentences): A sci-fi hook explaining why the player must defeat this boss to secure the data.
-            5. Write an "afterActionReport" with "victory" and "defeat" strings: Flavor text for the end of the mission.
-            6. ${typeInstructions[quizType]} 
+            1. Analyze the content and split it into distinct Sub-Topics. Each sub-topic will represent one Level (Floor) of the dungeon. Generate at least 2 levels and up to 4 levels.
+            2. The main subject of the file will be the "title" of the Dungeon.
+            3. For each Level, provide:
+               - "id": A unique string identifier.
+               - "topicName": The name of the sub-topic (e.g., 'Introduction to Anatomy').
+               - "enemyId": Choose one of the following enemy sprite identifiers: 'vanguard_scout', 'elite_sentinel', 'academic_overlord', 'chaos_guard'. Vary the sprite per level if possible.
+               - "questions": An array of questions for this level.
+            4. ${typeInstructions[quizType as keyof typeof typeInstructions]} All questions in all levels MUST follow this challenge mode.
             
             STRICT JSON SCHEMA:
             {
-              "subject": "string",
-              "bossName": "string",
-              "bossQuote": "string",
-              "missionBriefing": "string",
-              "afterActionReport": {
-                "victory": "string",
-                "defeat": "string"
-              },
-              "questions": [
+              "title": "string",
+              "levels": [
                 {
-                  "q": "string",
-                  "options": ["string", "string", "string", "string"],
-                  "correctIdx": number,
-                  "explanation": "string"
+                  "id": "string",
+                  "topicName": "string",
+                  "enemyId": "string",
+                  "questions": [
+                    {
+                      "q": "string",
+                      "options": ["string", "string", "string", "string"],
+                      "correctIdx": number,
+                      "explanation": "string"
+                    }
+                  ]
                 }
               ]
             }
@@ -109,50 +97,42 @@ export const generateBossBattle = async (
         // 🛡️ REPAIR LOGIC: Remove Markdown and find valid JSON boundaries
         let cleanJson = responseText.replace(/```json|```/g, "").trim();
 
-        // 🛡️ THE TRAILING COMMA KILLER: This regex removes commas followed by a closing bracket or brace
-        // This prevents the "Unexpected token ']'" error common in AI-generated JSON.
+        // 🛡️ THE TRAILING COMMA KILLER
         cleanJson = cleanJson.replace(/,[ \t\r\n]*([\]}])/g, '$1');
 
         const rawData = JSON.parse(cleanJson);
 
-        // Normalization Layer: Ensure all fields exist and options are padded for schema compliance
+        // Normalization Layer
         let dataToValidate = {
-            subject: rawData.subject || "General Intel",
-            bossName: rawData.bossName || "The Adversary",
-            bossQuote: rawData.bossQuote || "Prepare for evaluation.",
-            missionBriefing: rawData.missionBriefing || "Intel reveals a critical sector compromise. Your objective is to de-encrypt the target's logic gates.",
-            afterActionReport: {
-                victory: rawData.afterActionReport?.victory || "Sector secured. Intelligence successfully integrated.",
-                defeat: rawData.afterActionReport?.defeat || "Mission failed. Tactical retreat necessary."
-            },
-            questions: (rawData.questions || []).map((q: any) => ({
-                ...q,
-                // Hard-fix for option array lengths (Ensures exactly 4 strings for Zod)
-                options: Array.isArray(q.options)
-                    ? [...q.options, "", "", "", ""].slice(0, 4)
-                    : ["", "", "", ""]
-            }))
+            title: rawData.title || "General Intel",
+            levels: (rawData.levels || []).map((level: any) => ({
+                id: level.id || uuidv4(),
+                topicName: level.topicName || "Unknown Sector",
+                enemyId: level.enemyId || 'vanguard_scout',
+                questions: (level.questions || []).map((q: any) => {
+                    let options = Array.isArray(q.options)
+                        ? [...q.options, "", "", "", ""].slice(0, 4)
+                        : ["", "", "", ""];
+                    
+                    let correctIdx = q.correctIdx;
+
+                    if (quizType === 'true-false') {
+                        const aiCorrectOption = String(options[correctIdx] || '').toLowerCase();
+                        const isTrue = aiCorrectOption.includes('true') || (correctIdx === 0 && !aiCorrectOption.includes('false'));
+                        options = ['True', 'False', '', ''];
+                        correctIdx = isTrue ? 0 : 1;
+                    }
+
+                    return {
+                        ...q,
+                        options,
+                        correctIdx
+                    };
+                }).filter((q: any) => q.q && q.q.length > 2)
+            })).filter((level: any) => level.questions.length > 0)
         };
 
-        // 🛡️ TRUE/FALSE HARD-FIX: Prevents the "switched answer" bug
-        if (quizType === 'true-false') {
-            dataToValidate.questions = dataToValidate.questions.map((q: any) => {
-                // Determine the AI's intended answer by checking the text of the selected option
-                const aiCorrectOption = String(q.options[q.correctIdx] || '').toLowerCase();
-                const isTrue = aiCorrectOption.includes('true') || (q.correctIdx === 0 && !aiCorrectOption.includes('false'));
-                
-                return {
-                    ...q,
-                    options: ['True', 'False', '', ''],
-                    correctIdx: isTrue ? 0 : 1
-                };
-            });
-        }
-
-        // Filter out any questions that are completely missing text
-        dataToValidate.questions = dataToValidate.questions.filter((q: any) => q.q && q.q.length > 2);
-
-        if (dataToValidate.questions.length === 0) {
+        if (dataToValidate.levels.length === 0) {
             throw new Error("The AI failed to generate valid combat data for this sector.");
         }
 

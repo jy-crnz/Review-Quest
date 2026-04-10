@@ -45,8 +45,8 @@ export const MissionDebrief = () => {
 
     // Narrative Logic: Fallback to schema defaults if AI missed fields
     const aarText = isBossSlain 
-        ? currentQuiz?.afterActionReport?.victory || "Sector secured. Intelligence successfully integrated."
-        : currentQuiz?.afterActionReport?.defeat || "Mission failed. Tactical retreat necessary.";
+        ? "Sector secured. Intelligence successfully integrated."
+        : "Mission failed. Tactical retreat necessary.";
 
     const handleFinish = () => {
         setShowResults(false);

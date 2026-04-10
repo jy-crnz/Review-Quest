@@ -36,6 +36,18 @@ export const UserSchema = z.object({
     selectedPet: PetTypeSchema.default('cat'),
 });
 
+export const LevelSchema = z.object({
+    id: z.string(),
+    topicName: z.string(),
+    enemyId: z.string(),
+    questions: z.array(QuizQuestionSchema),
+});
+
+export const DungeonDataSchema = z.object({
+    title: z.string(),
+    levels: z.array(LevelSchema),
+});
+
 export const QuizSchema = z.object({
     ...baseEntity,
     reviewerId: z.string().uuid(),
@@ -74,3 +86,5 @@ export type User = z.infer<typeof UserSchema>;
 export type Quiz = z.infer<typeof QuizSchema>;
 export type QuizQuestion = z.infer<typeof QuizQuestionSchema>;
 export type Attempt = z.infer<typeof AttemptSchema>;
+export type DungeonData = z.infer<typeof DungeonDataSchema>;
+export type Level = z.infer<typeof LevelSchema>;

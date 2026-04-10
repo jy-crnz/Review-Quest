@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Quiz, type PetType } from '@/lib/schemas';
+import { Quiz, type PetType, DungeonData, Level } from '@/lib/schemas';
 
 // --- Engineering Standards: Balancing Constants ---
 const XP_PER_CORRECT_ANSWER = 20;
@@ -107,7 +107,9 @@ interface GameState {
     currentQuestionIndex: number;
     isGameOver: boolean;
     isBossSlain: boolean;
-    currentQuiz: Quiz | null;
+    currentQuiz: DungeonData | null;
+    currentLevelIndex: number;
+    isLevelComplete: boolean;
 
     // Character State
     playerName: string;
@@ -145,7 +147,8 @@ interface GameState {
 
     // Actions
     setPendingText: (text: string | null) => void;
-    setQuiz: (quiz: any, quizType: QuizType) => void;
+    setQuiz: (quiz: DungeonData, quizType: QuizType) => void;
+    nextLevel: () => void;
     setPetType: (type: PetType) => void;
     setPlayerName: (name: string) => void;
     updateAppearance: (look: Partial<CharacterAppearance>) => void;
@@ -201,6 +204,8 @@ export const useGameStore = create<GameState>()(
             bossQuote: '...',
             currentWaveIndex: 0,
             currentQuestionIndex: 0,
+            currentLevelIndex: 0,
+            isLevelComplete: false,
             isGameOver: false,
             isBossSlain: false,
             currentQuiz: null,
@@ -352,7 +357,7 @@ export const useGameStore = create<GameState>()(
             }),
 
             setQuiz: (quiz, quizType) => {
-                const subject = (quiz.subject || '').toLowerCase();
+                const subject = (quiz.title || '').toLowerCase();
                 let detected: CourseType = 'default';
                 if (subject.match(/it|computer|tech|code|software|programming|system|information/)) detected = 'it';
                 else if (subject.match(/nurse|nurs|med|health|clinic|patient|doctor|biolog/)) detected = 'nursing';
@@ -367,7 +372,7 @@ export const useGameStore = create<GameState>()(
 
                 const newNode: DungeonNode = {
                     id: newDungeonId,
-                    name: quiz.bossName || 'New Intel Sector',
+                    name: quiz.title || 'New Intel Sector',
                     subject: detected,
                     quizType: quizType,
                     status: 'available',
@@ -381,12 +386,14 @@ export const useGameStore = create<GameState>()(
                 const weapon = get().recipes.find(r => r.type === 'weapon' && r.targetId === get().appearance.weaponId);
                 const weaponAtk = weapon?.bonuses.attack || 0;
                 const waveHP = Math.floor((5 * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.8);
+                
+                const firstLevel = quiz.levels[0];
 
                 set((state) => ({
                     activeDungeonId: newDungeonId, dungeons: [...state.dungeons, newNode],
-                    currentQuiz: quiz, courseType: detected,
-                    mapNodes: quiz.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
-                    pendingExtractedText: null, bossName: `Wave 1: ${WAVES[0].title}`, bossQuote: WAVES[0].quote,
+                    currentQuiz: quiz, courseType: detected, currentLevelIndex: 0, isLevelComplete: false,
+                    mapNodes: firstLevel.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
+                    pendingExtractedText: null, bossName: `Floor 1: ${firstLevel.topicName}`, bossQuote: 'Prepare for evaluation.',
                     currentWaveIndex: 0, playerHP: PLAYER_HEALTH_POOL, bossHP: waveHP, maxBossHP: waveHP,
                     currentQuestionIndex: 0, combo: 0, ultimateCharge: 0,
                     sessionStats: { questionsCorrect: 0, questionsAttempted: 0, totalDamageDealt: 0 },
@@ -395,10 +402,35 @@ export const useGameStore = create<GameState>()(
                 }));
             },
 
-            handleAnswer: (answer) => set((state) => {
-                if (state.isGameOver || state.isBossSlain || !state.currentQuiz) return state;
+            nextLevel: () => set((state) => {
+                if (!state.currentQuiz) return state;
+                const nextLvlIdx = state.currentLevelIndex + 1;
+                if (nextLvlIdx >= state.currentQuiz.levels.length) return state;
 
-                const currentQuestion = state.currentQuiz.questions[state.currentQuestionIndex];
+                const nextLevelData = state.currentQuiz.levels[nextLvlIdx];
+                
+                const currentAtk = state.stats.attack;
+                const weapon = state.recipes.find(r => r.type === 'weapon' && r.targetId === state.appearance.weaponId);
+                const weaponAtk = weapon?.bonuses.attack || 0;
+                // Scale HP slightly for next level
+                const waveHP = Math.floor((5 * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * (0.8 + nextLvlIdx * 0.2));
+
+                return {
+                    currentLevelIndex: nextLvlIdx,
+                    isLevelComplete: false,
+                    currentQuestionIndex: 0,
+                    bossName: `Floor ${nextLvlIdx + 1}: ${nextLevelData.topicName}`,
+                    bossHP: waveHP,
+                    maxBossHP: waveHP,
+                    mapNodes: nextLevelData.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
+                };
+            }),
+
+            handleAnswer: (answer) => set((state) => {
+                if (state.isGameOver || state.isBossSlain || !state.currentQuiz || state.isLevelComplete) return state;
+
+                const currentLevel = state.currentQuiz.levels[state.currentLevelIndex];
+                const currentQuestion = currentLevel.questions[state.currentQuestionIndex];
                 const activeDungeon = state.dungeons.find(d => d.id === state.activeDungeonId);
                 const quizType = activeDungeon?.quizType || 'multiple-choice';
 
@@ -428,7 +460,7 @@ export const useGameStore = create<GameState>()(
                 const comboMultiplier = 1 + (Math.floor(nextCombo / 3) * 0.1);
 
                 let finalDamage = isCorrect ? Math.floor((BASE_DAMAGE_TO_BOSS + (state.stats.attack * 5) + bonusAtk) * comboMultiplier) : 0;
-                const isLastQuestion = state.currentQuestionIndex === state.currentQuiz.questions.length - 1;
+                const isLastQuestion = state.currentQuestionIndex === currentLevel.questions.length - 1;
                 if (isLastQuestion && isCorrect) finalDamage = state.bossHP;
 
                 const damageToPlayer = isCorrect ? 0 : Math.max(5, BASE_DAMAGE_TO_PLAYER - (state.stats.defense * 2) - bonusDef);
@@ -460,24 +492,45 @@ export const useGameStore = create<GameState>()(
                 };
 
                 const nextXP = state.currentXP + (isCorrect ? XP_PER_CORRECT_ANSWER : 0);
-                const nextLevel = Math.floor(nextXP / 100) + 1;
+                const nextLevelStats = Math.floor(nextXP / 100) + 1;
 
-                if (nextPlayerHP <= 0 || isLastQuestion) {
-                    const victory = nextPlayerHP > 0 && nextBossHP <= 0;
-                    if (victory) get().clearActiveDungeon();
-                    const lootDrop: Partial<LootInventory> = victory ? {
-                        hardened_plate: Math.floor(Math.random() * 3) + 1,
-                        neural_link: Math.random() > 0.5 ? 1 : 0,
-                        data_shard: Math.floor(Math.random() * 2),
-                        power_core: Math.random() > 0.8 ? 1 : 0
-                    } : {};
-
+                if (nextPlayerHP <= 0) {
                     return {
-                        playerHP: Math.max(0, nextPlayerHP), bossHP: 0, isGameOver: true, isBossSlain: victory,
-                        currentXP: nextXP + (victory ? VICTORY_BONUS_XP : 0), level: nextLevel,
-                        sessionStats: updatedStats, sessionLoot: lootDrop,
-                        runSummary: { reason: victory ? 'victory' : 'defeated', stats: updatedStats }
+                        playerHP: 0, bossHP: 0, isGameOver: true, isBossSlain: false,
+                        currentXP: nextXP, level: nextLevelStats,
+                        sessionStats: updatedStats, sessionLoot: {},
+                        runSummary: { reason: 'defeated', stats: updatedStats }
                     };
+                }
+                
+                if (isLastQuestion) {
+                    const isFinalLevel = state.currentLevelIndex === state.currentQuiz.levels.length - 1;
+                    if (isFinalLevel) {
+                        get().clearActiveDungeon();
+                        const lootDrop: Partial<LootInventory> = {
+                            hardened_plate: Math.floor(Math.random() * 3) + 1,
+                            neural_link: Math.random() > 0.5 ? 1 : 0,
+                            data_shard: Math.floor(Math.random() * 2),
+                            power_core: Math.random() > 0.8 ? 1 : 0
+                        };
+                        return {
+                            playerHP: nextPlayerHP, bossHP: 0, isGameOver: true, isBossSlain: true,
+                            currentXP: nextXP + VICTORY_BONUS_XP, level: nextLevelStats,
+                            sessionStats: updatedStats, sessionLoot: lootDrop,
+                            runSummary: { reason: 'victory', stats: updatedStats },
+                            isLevelComplete: true
+                        };
+                    } else {
+                        return {
+                            playerHP: nextPlayerHP, bossHP: 0, isLevelComplete: true,
+                            currentQuestionIndex: state.currentQuestionIndex, // keep it at last
+                            combo: nextCombo, maxCombo: Math.max(state.maxCombo, nextCombo),
+                            ultimateCharge: isCorrect ? Math.min(100, state.ultimateCharge + (5 + nextCombo * 2)) : state.ultimateCharge,
+                            currentXP: nextXP, level: nextLevelStats, sessionStats: updatedStats,
+                            skillPoints: nextLevelStats > state.level ? state.skillPoints + 1 : state.skillPoints,
+                            pendingLevelUp: nextLevelStats > state.level || state.pendingLevelUp,
+                        };
+                    }
                 }
 
                 return {
@@ -485,9 +538,9 @@ export const useGameStore = create<GameState>()(
                     currentWaveIndex: activeWaveIdx, playerHP: nextPlayerHP, currentQuestionIndex: nextQuestionIndex,
                     combo: nextCombo, maxCombo: Math.max(state.maxCombo, nextCombo),
                     ultimateCharge: isCorrect ? Math.min(100, state.ultimateCharge + (5 + nextCombo * 2)) : state.ultimateCharge,
-                    currentXP: nextXP, level: nextLevel, sessionStats: updatedStats,
-                    skillPoints: nextLevel > state.level ? state.skillPoints + 1 : state.skillPoints,
-                    pendingLevelUp: nextLevel > state.level || state.pendingLevelUp,
+                    currentXP: nextXP, level: nextLevelStats, sessionStats: updatedStats,
+                    skillPoints: nextLevelStats > state.level ? state.skillPoints + 1 : state.skillPoints,
+                    pendingLevelUp: nextLevelStats > state.level || state.pendingLevelUp,
                     mapNodes: state.mapNodes.map((n, i) => i <= state.currentQuestionIndex ? { ...n, status: 'cleared' as const } : i === nextQuestionIndex ? { ...n, status: 'current' as const } : n)
                 };
             }),
@@ -518,7 +571,7 @@ export const useGameStore = create<GameState>()(
                 set({
                     playerHP: PLAYER_HEALTH_POOL, isGameOver: false, runSummary: null, currentQuiz: null,
                     activeDungeonId: null, mapNodes: [], currentWaveIndex: 0, wrongAnswers: [],
-                    showResults: false, sessionLoot: null
+                    showResults: false, sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0
                 });
             },
 
@@ -526,11 +579,11 @@ export const useGameStore = create<GameState>()(
                 playerHP: PLAYER_HEALTH_POOL, currentQuestionIndex: 0, combo: 0, ultimateCharge: 0,
                 isGameOver: false, isBossSlain: false, pendingExtractedText: null, currentQuiz: null,
                 mapNodes: [], currentWaveIndex: 0, dungeons: [], wrongAnswers: [], showResults: false,
-                sessionLoot: null
+                sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0
             }),
         }),
         {
-            name: 'review-quest-v3',
+            name: 'review-quest-v2',
             partialize: (state) => ({
                 playerName: state.playerName,
                 appearance: state.appearance,

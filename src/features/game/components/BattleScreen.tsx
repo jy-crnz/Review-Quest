@@ -34,47 +34,37 @@ import { PlayerSprite } from './PlayerSprite';
 import { EnemySprite } from './EnemySprite';
 import { IntelLog } from './IntelLog';
 import { MissionDebrief } from './MissionDebrief';
-import { MissionBriefing } from './MissionBriefing'; // NEW: Story component
+import { MissionBriefing } from './MissionBriefing';
 
-/**
- * COMPONENT: BattleScreen
- * Role: Main tactical combat interface.
- * Logic: Coordinates real-time state from the store into visual combat sequences.
- * Features: Forge-Aware Stat Math, High-Priority Overlays, Canonical Logic.
- */
 export const BattleScreen = () => {
     const {
         currentQuiz, playerHP, bossHP, maxBossHP, bossName, bossQuote, currentQuestionIndex,
         currentXP, stats, combo, ultimateCharge, dungeons, activeDungeonId,
         isBossSlain, isGameOver, wrongAnswers, showInGameMap, playerName,
         showResults, setShowResults, recipes, appearance, showBriefing, courseType,
-        handleAnswer, useUltimate, toggleInGameMap, endRun, collectRewards, resetGame
+        handleAnswer, useUltimate, toggleInGameMap, endRun, collectRewards, resetGame,
+        currentLevelIndex, isLevelComplete, nextLevel
     } = useGameStore();
 
-    // --- 1. JUICE & UI STATES ---
     const [screenEffect, setScreenEffect] = useState<'hit' | 'damage' | 'none'>('none');
     const [xpPopup, setXpPopup] = useState<boolean>(false);
     const [damageNumber, setDamageNumber] = useState<{ val: number; id: number; isUlt?: boolean } | null>(null);
     const [showTelemetry, setShowTelemetry] = useState(false);
 
-    // --- 2. BOSS PHASE LOGIC ---
     const bossHPPercentage = Math.max(0, (bossHP / maxBossHP) * 100);
     const isPhaseTwo = bossHPPercentage < 50;
     const isPhaseCritical = bossHPPercentage < 20;
 
-    // --- 3. INTERACTION & ANIMATION LOCKS ---
     const [isAnimating, setIsAnimating] = useState(false);
     const [isConfirmingRetreat, setIsConfirmingRetreat] = useState(false);
 
-    // --- 🛡️ ARCHITECTURE: DYNAMIC CONTEXT LOOKUPS ---
     const activeDungeon = dungeons.find(d => d.id === activeDungeonId);
     const challengeType = activeDungeon?.quizType || 'multiple-choice';
-    const currentQuestion = currentQuiz?.questions[currentQuestionIndex];
+    const currentLevel = currentQuiz?.levels[currentLevelIndex];
+    const currentQuestion = currentLevel?.questions[currentQuestionIndex];
 
-    // UI Progress Math
-    const progress = currentQuiz ? ((currentQuestionIndex + 1) / currentQuiz.questions.length) * 100 : 0;
+    const progress = currentLevel ? ((currentQuestionIndex + 1) / currentLevel.questions.length) * 100 : 0;
 
-    // 🎯 FORGE BONUS CALCULATION: Reflecting Jay's crafted gear in live combat math
     const equippedBonuses = useMemo(() => {
         const armor = recipes.find(r => r.type === 'armor' && r.targetId === appearance.armorId);
         const weapon = recipes.find(r => r.type === 'weapon' && r.targetId === appearance.weaponId);
@@ -84,9 +74,7 @@ export const BattleScreen = () => {
         };
     }, [recipes, appearance]);
 
-    // --- 3. JUICE LOGIC: VISUAL FEEDBACK ---
     useEffect(() => {
-        // Trigger red screen flash when player takes damage
         if (playerHP > 0 && playerHP < 100 && screenEffect === 'none') {
             setScreenEffect('damage');
             const timer = setTimeout(() => setScreenEffect('none'), 400);
@@ -94,9 +82,8 @@ export const BattleScreen = () => {
         }
     }, [playerHP]);
 
-    // --- 4. COMBAT SEQUENCING ---
     const onExecuteAttack = async (answer: number | string) => {
-        if (isAnimating || !currentQuestion || isGameOver) return;
+        if (isAnimating || !currentQuestion || isGameOver || isLevelComplete) return;
 
         setIsAnimating(true);
 
@@ -111,7 +98,6 @@ export const BattleScreen = () => {
             setXpPopup(true);
             setTimeout(() => setXpPopup(false), 1000);
 
-            // DAMAGE MATH: Base (25) + Stats + Forge Bonuses * Combo Multiplier
             const nextCombo = combo + 1;
             const comboMultiplier = 1 + (Math.floor(nextCombo / 3) * 0.1);
             const baseAtk = 25 + (stats.attack * 5);
@@ -120,7 +106,6 @@ export const BattleScreen = () => {
             setDamageNumber({ val: totalDmg, id: Date.now() });
             setScreenEffect('hit');
 
-            // Allow animation to play out before updating store
             await new Promise(res => setTimeout(res, 600));
         } else {
             setScreenEffect('damage');
@@ -129,7 +114,6 @@ export const BattleScreen = () => {
 
         handleAnswer(answer);
 
-        // Reset visual state after store update
         setTimeout(() => {
             setIsAnimating(false);
             setDamageNumber(null);
@@ -138,7 +122,7 @@ export const BattleScreen = () => {
     };
 
     const onActivateUltimate = async () => {
-        if (ultimateCharge < 100 || isAnimating || isGameOver) return;
+        if (ultimateCharge < 100 || isAnimating || isGameOver || isLevelComplete) return;
 
         setScreenEffect('hit');
         setDamageNumber({ val: 100, id: Date.now(), isUlt: true });
@@ -154,7 +138,7 @@ export const BattleScreen = () => {
         }, 1000);
     };
 
-    if (!currentQuestion || !currentQuiz) return null;
+    if (!currentQuestion || !currentQuiz || !currentLevel) return null;
 
     const sectorNames = {
         it: "CYBER-PHYSICAL SECTOR",
@@ -167,15 +151,10 @@ export const BattleScreen = () => {
     return (
         <div className={`theme-${courseType} relative flex flex-col h-full space-y-8 animate-in fade-in duration-500 overflow-hidden ${screenEffect === 'damage' ? 'bg-red-900/10' : ''}`}>
 
-            {/* Arena Ambient VFX */}
             <div className="absolute inset-0 pointer-events-none -z-10">
                 <div className="absolute inset-0 course-pattern opacity-20" />
-                
-                {/* Subject-Colored Ambient Glows */}
                 <div className="absolute top-1/4 left-1/4 w-96 h-96 course-bg opacity-5 blur-[120px] rounded-full animate-pulse" />
                 <div className="absolute bottom-1/4 right-1/4 w-96 h-96 course-bg opacity-5 blur-[120px] rounded-full animate-pulse delay-1000" />
-
-                {/* Phase Critical Glitch Overlay */}
                 {isPhaseCritical && !isGameOver && (
                     <motion.div 
                         animate={{ opacity: [0.1, 0.3, 0.1], x: [-2, 2, -2] }}
@@ -185,7 +164,6 @@ export const BattleScreen = () => {
                 )}
             </div>
 
-            {/* --- LAYER: MISSION STATUS MAP OVERLAY (Z-90) --- */}
             <AnimatePresence>
                 {showInGameMap && (
                     <div className="fixed inset-0 z-90 flex items-center justify-center p-4 sm:p-12">
@@ -208,7 +186,33 @@ export const BattleScreen = () => {
                 )}
             </AnimatePresence>
 
-            {/* --- LAYER: TERMINAL GAME OVER MODAL (Z-100) --- */}
+            <AnimatePresence>
+                {isLevelComplete && !isGameOver && (
+                    <div className="fixed inset-0 z-105 flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-xl">
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            className="text-center space-y-6"
+                        >
+                            <RefreshCcw className="w-16 h-16 text-blue-500 animate-spin mx-auto" />
+                            <h2 className="text-4xl font-black italic tracking-tighter text-white uppercase mb-2">
+                                Sector Cleared
+                            </h2>
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">
+                                Descending to Next Floor
+                            </p>
+                            <button
+                                onClick={nextLevel}
+                                className="px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white font-black uppercase tracking-widest text-sm rounded-2xl cursor-pointer transition-all shadow-[0_0_20px_rgba(37,99,235,0.5)] active:scale-95"
+                            >
+                                Initiate Floor {currentLevelIndex + 2}
+                            </button>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
             <AnimatePresence>
                 {isGameOver && (
                     <div className="fixed inset-0 z-100 flex items-center justify-center p-6">
@@ -231,7 +235,7 @@ export const BattleScreen = () => {
                             </div>
 
                             <h2 className="text-4xl font-black italic tracking-tighter text-white uppercase mb-2">
-                                {isBossSlain ? 'Sector Secured' : 'Signal Lost'}
+                                {isBossSlain ? 'Dungeon Secured' : 'Signal Lost'}
                             </h2>
                             <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] mb-8">
                                 Operator {playerName} // Mission Result
@@ -270,17 +274,15 @@ export const BattleScreen = () => {
                 )}
             </AnimatePresence>
 
-            {/* --- LAYER: STORY BRIEFING OVERLAY (Z-150) --- */}
             <AnimatePresence>
                 {showBriefing && <MissionBriefing />}
             </AnimatePresence>
 
-            {/* --- 3. HUD: TACTICAL TELEMETRY --- */}
             <div className="relative z-20">
                 <div className="grid grid-cols-3 items-center pb-8">
                     <div className="flex flex-col">
                         <p className="text-[9px] font-black uppercase course-text tracking-widest leading-none">
-                            {sectorNames[courseType as keyof typeof sectorNames] || sectorNames.default}
+                            {currentLevel.topicName || sectorNames[courseType as keyof typeof sectorNames] || sectorNames.default}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
                             <span className={`w-1.5 h-1.5 rounded-full ${isPhaseCritical ? 'bg-red-500 animate-ping' : 'bg-green-500'}`} />
@@ -307,11 +309,10 @@ export const BattleScreen = () => {
                     </div>
                 </div>
 
-                {/* ENCOUNTER PROGRESS BAR */}
                 <div className="relative pt-2">
                     <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-slate-950 border border-slate-800 rounded-full flex items-center gap-2 z-10 shadow-xl">
                         <Target className="w-2.5 h-2.5 course-text" />
-                        <span className="text-[8px] font-black uppercase text-slate-400 tracking-widest leading-none">Encounter Progress</span>
+                        <span className="text-[8px] font-black uppercase text-slate-400 tracking-widest leading-none">Floor Progress</span>
                     </div>
                     <div className="w-full h-1 bg-slate-800/50 rounded-full overflow-hidden">
                         <div
@@ -322,25 +323,19 @@ export const BattleScreen = () => {
                 </div>
             </div>
 
-            {/* --- 4. THE RPG STAGE (BATTLE ARENA) --- */}
             <div className={`relative z-10 flex items-center justify-between gap-4 px-2 sm:px-12 py-12 bg-slate-950/20 border-y border-slate-800/30 rounded-4xl min-h-60 shadow-inner transition-colors duration-1000 ${isPhaseCritical ? 'border-red-500/20 bg-red-950/5' : ''}`}>
 
-                {/* PLAYER UNIT SIDE */}
                 <div className="flex flex-col items-center gap-6 flex-1 max-w-50">
                     <div className="relative flex items-center justify-center">
-                        {/* Companion drone / Study Buddy */}
                         <div className="absolute -left-16 top-1/2 -translate-y-1/2 scale-75 opacity-70 z-10 hidden sm:block">
                             <StudyBuddy />
                         </div>
-
-                        {/* High-Fidelity Customized Operator */}
                         <PlayerSprite
                             isAttacking={isAnimating && damageNumber !== null}
                             isHit={screenEffect === 'damage'}
                         />
                     </div>
 
-                    {/* PLAYER STABILITY BARS */}
                     <div className="w-full space-y-2">
                         <div className="flex justify-between items-baseline">
                             <div className="flex items-center gap-1.5">
@@ -360,7 +355,6 @@ export const BattleScreen = () => {
                                 style={{ width: `${playerHP}%` }}
                             />
                         </div>
-                        {/* Ultimate Meter */}
                         <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden">
                             <div
                                 className={`h-full transition-all duration-700 ${ultimateCharge === 100 ? 'bg-yellow-400 shadow-[0_0_15px_#eab308] animate-pulse' : 'course-bg opacity-20'}`}
@@ -370,12 +364,10 @@ export const BattleScreen = () => {
                     </div>
                 </div>
 
-                {/* CENTRAL VS DIVIDER & DYNAMIC DAMAGE NUMBERS */}
                 <div className="flex flex-col items-center justify-center gap-3 relative h-32 px-4 shrink-0">
                     <span className="text-2xl font-black italic text-slate-800 select-none animate-pulse uppercase tracking-tighter">vs</span>
                     <div className="w-px h-full bg-linear-to-b from-transparent via-slate-800/50 to-transparent" />
 
-                    {/* DAMAGE FEEDBACK LAYER */}
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-50">
                         <AnimatePresence>
                             {damageNumber && (
@@ -400,7 +392,6 @@ export const BattleScreen = () => {
                     </div>
                 </div>
 
-                {/* ENEMY UNIT SIDE */}
                 <div className="flex flex-col items-center gap-6 flex-1 max-w-50">
                     <EnemySprite
                         isHit={isAnimating && damageNumber !== null}
@@ -425,14 +416,12 @@ export const BattleScreen = () => {
                 </div>
             </div>
 
-            {/* --- 5. ENCOUNTER CARD: INTEL CONTENT --- */}
             <div className="flex-1 flex flex-col justify-center py-2 relative z-10 min-h-32">
                 <div className={`relative bg-slate-900/40 border border-slate-800/60 p-8 rounded-4xl shadow-2xl backdrop-blur-xs transition-all duration-1000 ${isPhaseCritical ? 'border-red-500/30' : ''}`}>
                     <p className="text-xl font-bold tracking-tight text-slate-100 leading-snug text-center">
                         {currentQuestion.q}
                     </p>
 
-                    {/* XP NOTIFICATION POPUP */}
                     <AnimatePresence>
                         {xpPopup && (
                             <motion.div
@@ -452,11 +441,10 @@ export const BattleScreen = () => {
                 </div>
             </div>
 
-            {/* --- 6. RESPONSE HUB: TACTICAL INPUTS --- */}
             <div className="relative z-10">
                 {challengeType === 'enumeration' ? (
                     <EnumerationInput
-                        disabled={isAnimating || isGameOver}
+                        disabled={isAnimating || isGameOver || isLevelComplete}
                         onExecute={(val) => onExecuteAttack(val)}
                     />
                 ) : (
@@ -467,7 +455,7 @@ export const BattleScreen = () => {
                                 <button
                                     key={idx}
                                     onClick={() => onExecuteAttack(idx)}
-                                    disabled={isAnimating || isGameOver}
+                                    disabled={isAnimating || isGameOver || isLevelComplete}
                                     className={`p-5 rounded-2xl border text-left transition-all duration-200 active:scale-[0.98] cursor-pointer 
                                     ${challengeType === 'true-false' ? 'text-center font-black text-base py-8' : 'text-sm font-medium'}
                                     bg-slate-900/50 border-slate-800/50 text-slate-400 hover:border-blue-500 hover:bg-blue-600/10 hover:text-white 
@@ -484,9 +472,7 @@ export const BattleScreen = () => {
                 )}
             </div>
 
-            {/* --- 7. FOOTER ACTION BAR --- */}
             <div className="pt-6 flex items-center justify-between border-t border-slate-800/50 relative z-10">
-                {/* Retreat Control */}
                 <button
                     onClick={() => setIsConfirmingRetreat(true)}
                     className="p-3 text-slate-700 hover:text-red-500 transition-all hover:bg-red-500/5 rounded-xl cursor-pointer"
@@ -496,7 +482,6 @@ export const BattleScreen = () => {
                 </button>
 
                 <div className="flex items-center gap-4">
-                    {/* Visual Power Matrix */}
                     <div className="hidden sm:flex items-center gap-4 px-5 py-2.5 rounded-2xl bg-slate-900/80 border border-white/5 shadow-2xl">
                         <div className="flex items-center gap-2">
                             <Swords className="w-3.5 h-3.5 text-red-500/80" />
@@ -509,7 +494,6 @@ export const BattleScreen = () => {
                         </div>
                     </div>
 
-                    {/* Streak Indicator */}
                     {combo > 1 && !isGameOver && (
                         <motion.div
                             initial={{ scale: 0.8 }} animate={{ scale: 1 }}
@@ -519,7 +503,6 @@ export const BattleScreen = () => {
                         </motion.div>
                     )}
 
-                    {/* Ultimate Ability Control */}
                     {ultimateCharge === 100 && !isGameOver && (
                         <button
                             onClick={onActivateUltimate}
@@ -531,7 +514,6 @@ export const BattleScreen = () => {
                 </div>
             </div>
 
-            {/* --- ABANDON CONFIRMATION OVERLAY (Z-110) --- */}
             <AnimatePresence>
                 {isConfirmingRetreat && (
                     <div className="fixed inset-0 z-110 flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md">
@@ -565,7 +547,6 @@ export const BattleScreen = () => {
                 )}
             </AnimatePresence>
 
-            {/* SECONDARY MODAL REGISTRY */}
             <AnimatePresence>
                 {showTelemetry && <IntelLog onClose={() => setShowTelemetry(false)} />}
             </AnimatePresence>

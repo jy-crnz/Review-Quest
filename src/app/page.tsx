@@ -443,7 +443,7 @@ export default function Home() {
                 <div className="text-right">
                   <p className="text-[8px] text-slate-600 font-bold uppercase leading-none mb-1">Yield</p>
                   <p className="text-base md:text-lg font-black text-blue-400">
-                    {(currentQuiz.questions.length * 20) + 100} XP
+                    {(currentQuiz.levels.reduce((acc, level) => acc + level.questions.length, 0) * 20) + 100} XP
                   </p>
                 </div>
               </motion.div>

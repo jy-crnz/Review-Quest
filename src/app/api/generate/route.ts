@@ -32,7 +32,7 @@ export async function POST(req: Request) {
             // Pass the cached text and the user's chosen mode to the AI generator
             const battleData = await generateBossBattle(text, quizType as any);
 
-            console.log(`--- [AI SUCCESS: ${battleData.bossName} MANIFESTED] ---`);
+            console.log(`--- [AI SUCCESS: ${battleData.title} MANIFESTED] ---`);
 
             // Return the full battle object (subject, boss details, questions)
             return NextResponse.json(battleData);

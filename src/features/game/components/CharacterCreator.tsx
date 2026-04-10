@@ -98,7 +98,6 @@ export const CharacterCreator = () => {
                         appearance={appearance}
                         skinColor={currentSkin.color}
                         isOverlord={isOverlord}
-                        equippedArmorAsset={equippedArmor?.assetPath}
                     />
                 </motion.div>
 

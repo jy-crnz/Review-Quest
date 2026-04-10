@@ -242,10 +242,13 @@ export const TheForge = () => {
             <AnimatePresence>
                 {showSuccess && (
                     <motion.div
-                        initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }}
-                        className="fixed bottom-12 left-1/2 -translate-x-1/2 z-50 bg-emerald-500 text-black px-8 py-4 rounded-2xl font-black uppercase text-xs tracking-widest shadow-2xl flex items-center gap-3"
+                        initial={{ opacity: 0, y: 50 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.9 }}
+                        className="fixed bottom-12 left-1/2 -translate-x-1/2 z-50 bg-emerald-500 text-black px-8 py-4 rounded-2xl font-black uppercase text-xs tracking-widest shadow-2xl flex items-center gap-3 whitespace-nowrap max-w-max"
                     >
-                        <Sparkles className="w-4 h-4" /> System Integration Complete
+                        <Sparkles className="w-4 h-4" />
+                        System Integration Complete
                     </motion.div>
                 )}
             </AnimatePresence>
