@@ -69,6 +69,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `GEMINI_MODEL` | No | Default `gemini-2.5-flash` |
 | `GROQ_MODEL` | No | Default `openai/gpt-oss-120b` |
 | `AI_MODEL` | No | OpenRouter model, default `google/gemini-2.5-flash-lite` |
+| `RATE_LIMIT_PER_MINUTE` | No | Max requests per minute per IP, per API route (default 30) |
 | `NEXT_PUBLIC_SUPABASE_URL` | No | Cloud sync (not wired up yet) |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | No | Cloud sync (not wired up yet) |
 
@@ -97,10 +98,24 @@ src/
 
 For design principles and layering, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## 🛡️ API protection
+
+All API routes validate their input with Zod and apply these limits (defined in `src/lib/api/limits.ts`):
+
+| Limit | Value |
+| --- | --- |
+| Upload size | 20 MB, PDF only (checked by file contents, not just the extension) |
+| PDF pages read | first 500 |
+| Study text | 300,000 characters |
+| Requests | 30 per minute per IP, per route (`RATE_LIMIT_PER_MINUTE`) |
+
+Errors always use the shape `{ "error": { "code": "...", "message": "..." } }`. Messages are generic; details go to server logs only.
+
 ## ⚠️ Known limitations
 
-- **PDF only.** The upload field accepts `.pptx`, but extraction currently uses PDF.js, so PowerPoint files will fail.
-- **No auth or rate limiting on API routes yet.** Don't expose a deployment publicly with your own API keys until this is added.
+- **PDF only.** PowerPoint (PPTX) files are rejected with a friendly message. Export your slides to PDF first.
+- **Rate limiting is in-memory.** Counters live in the server process, so on serverless hosts the limit applies per instance. Use a shared store (e.g. Upstash Redis) for strict limits. The client IP is read from `x-forwarded-for`, which is only trustworthy behind a platform that sets it (e.g. Vercel).
+- **The AI only reads the first ~80,000 characters** of a document when building the syllabus.
 - **Cloud sync is unfinished.** Progress is stored locally in the browser.
 
 ## 🗺️ Roadmap
@@ -111,7 +126,7 @@ For design principles and layering, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 - [x] The Forge crafting
 - [x] Character creator and sprite compositing
 - [ ] PPTX support
-- [ ] API route hardening (input limits, rate limiting)
+- [x] API route hardening (input limits, validation, rate limiting)
 - [ ] Automated tests
 - [ ] Cloud sync with Supabase Auth and Row Level Security
 - [ ] Multiplayer / social features

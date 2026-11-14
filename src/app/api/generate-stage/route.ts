@@ -1,28 +1,28 @@
 import { NextResponse } from 'next/server';
 import { generateStageQuestions } from '@/features/game/services/stageQuestionService';
+import { jsonError, parseJsonRequest } from '@/lib/api/http';
+import { MAX_STAGE_BODY_BYTES } from '@/lib/api/limits';
+import { GenerateStageRequestSchema } from '@/lib/api/schemas';
+import { devLog } from '@/lib/logger';
 
 export async function POST(req: Request) {
+    const parsed = await parseJsonRequest(req, {
+        routeKey: 'generate-stage',
+        schema: GenerateStageRequestSchema,
+        maxBytes: MAX_STAGE_BODY_BYTES,
+    });
+    if (!parsed.ok) return parsed.response;
+
+    const { stage, quizType } = parsed.data;
+
     try {
-        const body = await req.json();
-        const { stage, quizType } = body;
-
-        if (!stage || !stage.items || stage.items.length === 0) {
-            return NextResponse.json(
-                { error: { code: 'INVALID_STAGE', message: 'Stage data with items is required.' } },
-                { status: 400 }
-            );
-        }
-
-        console.log(`--- [JIT ARCHITECT: GENERATING QUESTIONS FOR ${stage.title}] ---`);
-        const questions = await generateStageQuestions(stage, quizType || 'multiple-choice');
-        console.log(`--- [JIT SUCCESS: ${questions.length} QUESTIONS READY] ---`);
+        devLog(`--- [JIT ARCHITECT: GENERATING QUESTIONS FOR ${stage.title}] ---`);
+        const questions = await generateStageQuestions(stage, quizType);
+        devLog(`--- [JIT SUCCESS: ${questions.length} QUESTIONS READY] ---`);
 
         return NextResponse.json({ questions });
-    } catch (error: any) {
+    } catch (error) {
         console.error('STAGE_GENERATION_CRASH:', error);
-        return NextResponse.json(
-            { error: { code: 'GENERATION_FAILED', message: error.message || 'Failed to generate stage questions.' } },
-            { status: 500 }
-        );
+        return jsonError('GENERATION_FAILED', 'Failed to generate stage questions. Please try again.', 500);
     }
 }

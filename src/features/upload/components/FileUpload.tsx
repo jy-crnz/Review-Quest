@@ -29,13 +29,12 @@ export const FileUpload = () => {
         const file = e.target.files?.[0];
         if (!file) return;
 
-        // 1. Boundary Validation (Type)
-        const isPdf = file.type === 'application/pdf';
-        const isPptx = file.name.endsWith('.pptx');
+        // 1. Boundary Validation (Type). The server re-checks the real file contents.
+        const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
-        if (!isPdf && !isPptx) {
+        if (!isPdf) {
             setStatus('error');
-            setErrorMsg("Incompatible Intel. Use PDF or PPTX.");
+            setErrorMsg("Incompatible Intel. Use a PDF file.");
             return;
         }
 
@@ -64,7 +63,8 @@ export const FileUpload = () => {
             const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data.error || "Intel Extraction Interrupted.");
+                const message = typeof data.error === 'string' ? data.error : data.error?.message;
+                throw new Error(message || "Intel Extraction Interrupted.");
             }
 
             // 5. Sandbox Sync
@@ -116,7 +116,7 @@ export const FileUpload = () => {
                             )}
                         </p>
                         <p className="text-[10px] text-slate-600 uppercase tracking-[0.3em] font-black">
-                            {status === 'error' ? errorMsg : "PDF / PPTX (MAX. 20MB)"}
+                            {status === 'error' ? errorMsg : "PDF (MAX. 20MB)"}
                         </p>
                     </div>
 
@@ -124,7 +124,7 @@ export const FileUpload = () => {
                         ref={fileInputRef}
                         type="file"
                         className="hidden"
-                        accept=".pdf,.pptx"
+                        accept=".pdf,application/pdf"
                         onChange={handleFileChange}
                         disabled={isUploading}
                     />

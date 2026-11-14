@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { jsonError, rateLimitGuard, readBodyLimited } from '@/lib/api/http';
+import {
+    EXTRACT_TIME_BUDGET_MS,
+    MAX_PDF_PAGES,
+    MAX_STUDY_TEXT_CHARS,
+    MAX_UPLOAD_BYTES,
+    MULTIPART_OVERHEAD_BYTES,
+} from '@/lib/api/limits';
+import { devLog } from '@/lib/logger';
 
 // 1. Engineering Standard: Use the ESM build for Turbopack compatibility
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -15,12 +24,6 @@ if (typeof window === 'undefined') {
     // @ts-ignore
     pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).toString();
 }
-
-/**
- * FEATURE: Tactical Payload Capacity
- * Protocol: 20MB threshold for dense academic PDFs and PPTX conversions.
- */
-const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
 /**
  * TEXT LAYOUT NORMALIZATION
@@ -51,32 +54,61 @@ function normalizeExtractedText(text: string): string {
     return text.trim();
 }
 
+/**
+ * PDFs start with "%PDF-" (the spec allows up to 1024 bytes of leading junk).
+ * We trust these magic bytes, not the browser-supplied MIME type or filename.
+ */
+function looksLikePdf(bytes: Uint8Array): boolean {
+    const head = Buffer.from(bytes.subarray(0, 1024)).toString('latin1');
+    return head.includes('%PDF-');
+}
+
+function looksLikeZip(bytes: Uint8Array): boolean {
+    // PPTX/DOCX/XLSX are ZIP containers ("PK").
+    return bytes.length > 1 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+}
+
 export async function POST(req: Request) {
+    const limited = rateLimitGuard(req, 'extract');
+    if (limited) return limited;
+
     try {
-        // 🎯 LOGIC: We use formData here because the FileUpload sends a physical file.
-        const formData = await req.formData();
-        const file = formData.get('file') as File;
-
-        // 1. Boundary Checks: Architecture is kindness to my future self
-        if (!file) {
-            return NextResponse.json(
-                { error: 'No intel file provided. Operation aborted.' },
-                { status: 400 }
-            );
+        // 1. Read the body with a hard size cap (never buffers more than the limit).
+        const raw = await readBodyLimited(req, MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES);
+        if (raw === null) {
+            return jsonError('PAYLOAD_TOO_LARGE', 'Intel too dense. Max 20MB limit exceeded.', 413);
         }
 
-        if (file.size > MAX_FILE_SIZE) {
-            return NextResponse.json(
-                { error: `Intel too dense. Max 20MB limit exceeded.` },
-                { status: 400 }
-            );
+        // 2. Parse multipart form data from the buffered bytes.
+        let file: FormDataEntryValue | null;
+        try {
+            const formData = await new Response(new Uint8Array(raw), {
+                headers: { 'content-type': req.headers.get('content-type') ?? '' },
+            }).formData();
+            file = formData.get('file');
+        } catch {
+            return jsonError('INVALID_INPUT', 'Upload could not be read. Please try again.', 400);
         }
 
-        // 2. Data Access: Prepare Buffer for PDF.js
-        const bytes = await file.arrayBuffer();
-        const buffer = new Uint8Array(bytes);
+        if (!file || typeof file === 'string') {
+            return jsonError('INVALID_INPUT', 'No intel file provided. Operation aborted.', 400);
+        }
 
-        // 3. Extraction Logic: Server-Side Parsing
+        if (file.size > MAX_UPLOAD_BYTES) {
+            return jsonError('PAYLOAD_TOO_LARGE', 'Intel too dense. Max 20MB limit exceeded.', 413);
+        }
+
+        // 3. Validate the actual file contents, not the declared type.
+        const buffer = new Uint8Array(await file.arrayBuffer());
+
+        if (!looksLikePdf(buffer)) {
+            const message = looksLikeZip(buffer)
+                ? 'PowerPoint (PPTX) files are not supported yet. Please export your slides to PDF and upload that.'
+                : 'Incompatible Intel. Please upload a valid PDF file.';
+            return jsonError('INVALID_FILE', message, 400);
+        }
+
+        // 4. Extraction Logic: Server-Side Parsing
         const loadingTask = pdfjs.getDocument({
             data: buffer,
             disableWorker: true, // Forces extraction on the main server thread for stability
@@ -86,46 +118,68 @@ export async function POST(req: Request) {
         } as any);
 
         const pdf = await loadingTask.promise;
-        let extractedText = "";
 
-        // Iterate through all pages to capture total intel
-        for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const textContent = await page.getTextContent();
+        try {
+            let extractedText = "";
+            let truncated = pdf.numPages > MAX_PDF_PAGES;
+            const pagesToRead = Math.min(pdf.numPages, MAX_PDF_PAGES);
+            const startedAt = Date.now();
 
-            const pageText = textContent.items
-                .map((item: any) => (item as any).str)
-                .join(" ");
+            // Iterate through pages, stopping early if the text, page, or time budget is exhausted
+            for (let i = 1; i <= pagesToRead; i++) {
+                if (extractedText.length >= MAX_STUDY_TEXT_CHARS || Date.now() - startedAt > EXTRACT_TIME_BUDGET_MS) {
+                    truncated = true;
+                    break;
+                }
 
-            extractedText += pageText + "\n";
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+
+                const pageText = textContent.items
+                    .map((item) => ('str' in item ? item.str : ''))
+                    .join(" ");
+
+                extractedText += pageText + "\n";
+            }
+
+            devLog(`\n--- [SCANNER SUCCESS: ${pdf.numPages} PAGES, ${extractedText.length} CHARS${truncated ? ', TRUNCATED' : ''}] ---`);
+
+            // Normalize the raw extracted text, then enforce the hard character cap
+            extractedText = normalizeExtractedText(extractedText);
+            if (extractedText.length > MAX_STUDY_TEXT_CHARS) {
+                extractedText = extractedText.slice(0, MAX_STUDY_TEXT_CHARS);
+                truncated = true;
+            }
+
+            // 5. Content Validation
+            if (!extractedText || extractedText.trim().length < 50) {
+                return jsonError(
+                    'INVALID_FILE',
+                    'This PDF appears to be a scanned image with no selectable text. Please upload a text-based PDF or a typed document.',
+                    400
+                );
+            }
+
+            // 6. Response: Return raw text to be cached in the Store's pendingExtractedText
+            return NextResponse.json({
+                extractedText,
+                pageCount: pdf.numPages,
+                truncated,
+            });
+        } finally {
+            await pdf.destroy();
+        }
+    } catch (error) {
+        const name = (error as { name?: string } | null)?.name;
+
+        if (name === 'PasswordException') {
+            return jsonError('INVALID_FILE', 'This PDF is password-protected. Please remove the password and try again.', 400);
+        }
+        if (name === 'InvalidPDFException' || name === 'FormatError') {
+            return jsonError('INVALID_FILE', 'This PDF appears to be corrupted or invalid.', 400);
         }
 
-        // 🔍 Console Log: ReviewQuest Engine Status
-        console.log(`\n--- [SCANNER SUCCESS: ${pdf.numPages} PAGES EXTRACTED] ---`);
-
-        // Normalize the raw extracted text before validation
-        extractedText = normalizeExtractedText(extractedText);
-
-        // 4. Content Validation
-        if (!extractedText || extractedText.trim().length < 50) {
-            return NextResponse.json(
-                { error: 'This PDF appears to be a scanned image with no selectable text. Please upload a text-based PDF or a typed document.' },
-                { status: 400 }
-            );
-        }
-
-        // 5. Response: Return raw text to be cached in the Store's pendingExtractedText
-        return NextResponse.json({
-            extractedText,
-            pageCount: pdf.numPages
-        });
-
-    } catch (error: any) {
         console.error('SCANNER_CRASH_DETAILS:', error);
-
-        return NextResponse.json(
-            { error: 'The intel extraction system encountered a critical failure.' },
-            { status: 500 }
-        );
+        return jsonError('EXTRACTION_FAILED', 'The intel extraction system encountered a critical failure.', 500);
     }
 }

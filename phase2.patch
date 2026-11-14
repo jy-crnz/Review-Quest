@@ -1,0 +1,2107 @@
+diff --git a/.env.example b/.env.example
+index 1b3bca6..cf7805a 100644
+--- a/.env.example
++++ b/.env.example
+@@ -25,6 +25,13 @@ OPENROUTER_API_KEY=
+ # GROQ_MODEL=openai/gpt-oss-120b
+ # AI_MODEL=google/gemini-2.5-flash-lite   # used for the OpenRouter fallback
+ 
++# ---------------------------------------------------------------
++# API protection
++# ---------------------------------------------------------------
++# Max requests per minute per client IP, per API route (default 30).
++# Raise it if many users share one network (e.g. a classroom).
++# RATE_LIMIT_PER_MINUTE=30
++
+ # ---------------------------------------------------------------
+ # Supabase (OPTIONAL: cloud sync is a work in progress)
+ # ---------------------------------------------------------------
+diff --git a/README.md b/README.md
+index 23b9529..448af25 100644
+--- a/README.md
++++ b/README.md
+@@ -69,6 +69,7 @@ Open [http://localhost:3000](http://localhost:3000).
+ | `GEMINI_MODEL` | No | Default `gemini-2.5-flash` |
+ | `GROQ_MODEL` | No | Default `openai/gpt-oss-120b` |
+ | `AI_MODEL` | No | OpenRouter model, default `google/gemini-2.5-flash-lite` |
++| `RATE_LIMIT_PER_MINUTE` | No | Max requests per minute per IP, per API route (default 30) |
+ | `NEXT_PUBLIC_SUPABASE_URL` | No | Cloud sync (not wired up yet) |
+ | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | No | Cloud sync (not wired up yet) |
+ 
+@@ -97,10 +98,24 @@ src/
+ 
+ For design principles and layering, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+ 
++## 🛡️ API protection
++
++All API routes validate their input with Zod and apply these limits (defined in `src/lib/api/limits.ts`):
++
++| Limit | Value |
++| --- | --- |
++| Upload size | 20 MB, PDF only (checked by file contents, not just the extension) |
++| PDF pages read | first 500 |
++| Study text | 300,000 characters |
++| Requests | 30 per minute per IP, per route (`RATE_LIMIT_PER_MINUTE`) |
++
++Errors always use the shape `{ "error": { "code": "...", "message": "..." } }`. Messages are generic; details go to server logs only.
++
+ ## ⚠️ Known limitations
+ 
+-- **PDF only.** The upload field accepts `.pptx`, but extraction currently uses PDF.js, so PowerPoint files will fail.
+-- **No auth or rate limiting on API routes yet.** Don't expose a deployment publicly with your own API keys until this is added.
++- **PDF only.** PowerPoint (PPTX) files are rejected with a friendly message. Export your slides to PDF first.
++- **Rate limiting is in-memory.** Counters live in the server process, so on serverless hosts the limit applies per instance. Use a shared store (e.g. Upstash Redis) for strict limits. The client IP is read from `x-forwarded-for`, which is only trustworthy behind a platform that sets it (e.g. Vercel).
++- **The AI only reads the first ~80,000 characters** of a document when building the syllabus.
+ - **Cloud sync is unfinished.** Progress is stored locally in the browser.
+ 
+ ## 🗺️ Roadmap
+@@ -111,7 +126,7 @@ For design principles and layering, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
+ - [x] The Forge crafting
+ - [x] Character creator and sprite compositing
+ - [ ] PPTX support
+-- [ ] API route hardening (input limits, rate limiting)
++- [x] API route hardening (input limits, validation, rate limiting)
+ - [ ] Automated tests
+ - [ ] Cloud sync with Supabase Auth and Row Level Security
+ - [ ] Multiplayer / social features
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 4fb475c..111b979 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -13,10 +13,13 @@ ReviewQuest uses feature-first organization with a layered separation, so logic,
+ | Data / schemas | `src/lib/schemas.ts` | Zod schemas as the single source of truth for entities. |
+ | Infrastructure | `src/lib/multiAiClient.ts`, `src/lib/supabase.ts` | External clients and environment boundaries. |
+ | Routes | `src/app/api/*` | Thin HTTP handlers that call the service layer. |
++| API guards | `src/lib/api/*` | Shared request handling: rate limiting, size limits, Zod request schemas, error responses. |
+ 
+ ## Request flow
+ 
+-1. **`/api/extract`**: the uploaded PDF is parsed server-side with `pdfjs-dist`, and the text is normalized.
++Every API route first runs the shared guards in `src/lib/api`: **rate limit → size-limited body read → JSON parse → Zod validation**. Only then does it call a service.
++
++1. **`/api/extract`**: the uploaded PDF is verified by its magic bytes, parsed server-side with `pdfjs-dist`, and the text is normalized and capped.
+ 2. **`/api/syllabus`**: the text is split into sub-topics (one per floor).
+ 3. **`/api/generate` / `/api/generate-stage`**: AI generates the boss and its questions for the chosen quiz type.
+ 4. **`multiAiClient`** sends each request to Gemini, falling back to Groq and then OpenRouter on failure or timeout.
+diff --git a/phase1.patch b/phase1.patch
+deleted file mode 100644
+index 54b7311..0000000
+--- a/phase1.patch
++++ /dev/null
+@@ -1,1272 +0,0 @@
+-diff --git a/.env.example b/.env.example
+-new file mode 100644
+-index 0000000..1b3bca6
+---- /dev/null
+-+++ b/.env.example
+-@@ -0,0 +1,35 @@
+-+# ReviewQuest environment variables
+-+# Copy this file to `.env.local` and fill in your own keys:
+-+#   cp .env.example .env.local
+-+# NEVER commit `.env.local` or real keys.
+-+
+-+# ---------------------------------------------------------------
+-+# AI providers (server-side only, no NEXT_PUBLIC_ prefix)
+-+# ---------------------------------------------------------------
+-+# You need at least ONE of these. Requests try Gemini first, then
+-+# Groq, then OpenRouter, so adding more gives you automatic failover.
+-+
+-+# Google AI Studio: https://aistudio.google.com/apikey
+-+GEMINI_API_KEY=
+-+
+-+# Groq: https://console.groq.com/keys
+-+GROQ_API_KEY=
+-+
+-+# OpenRouter: https://openrouter.ai/keys
+-+OPENROUTER_API_KEY=
+-+
+-+# ---------------------------------------------------------------
+-+# Optional model overrides (defaults shown)
+-+# ---------------------------------------------------------------
+-+# GEMINI_MODEL=gemini-2.5-flash
+-+# GROQ_MODEL=openai/gpt-oss-120b
+-+# AI_MODEL=google/gemini-2.5-flash-lite   # used for the OpenRouter fallback
+-+
+-+# ---------------------------------------------------------------
+-+# Supabase (OPTIONAL: cloud sync is a work in progress)
+-+# ---------------------------------------------------------------
+-+# The app runs fine without these. They are only needed once cloud
+-+# sync is wired up. The anon key is public by design, so protect your
+-+# data with Row Level Security, not by hiding this key.
+-+NEXT_PUBLIC_SUPABASE_URL=
+-+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+-diff --git a/.gitignore b/.gitignore
+-index 5ef6a52..7b8da95 100644
+---- a/.gitignore
+-+++ b/.gitignore
+-@@ -32,6 +32,7 @@ yarn-error.log*
+- 
+- # env files (can opt-in for committing if needed)
+- .env*
+-+!.env.example
+- 
+- # vercel
+- .vercel
+-diff --git a/PROJECT_OVERVIEW.md b/PROJECT_OVERVIEW.md
+-deleted file mode 100644
+-index b661380..0000000
+---- a/PROJECT_OVERVIEW.md
+-+++ /dev/null
+-@@ -1,56 +0,0 @@
+--# ReviewQuest: The Gamified Study RPG
+--
+--## Project Vision
+--**ReviewQuest** is a gamified learning platform that transforms dense study materials into an immersive Sci-Fi RPG experience. By leveraging AI to process user-uploaded documents (like PDFs), the application generates challenging multi-level "Dungeons" where knowledge is the primary weapon.
+--
+-----
+--
+--## Core Features & Current Progress
+--
+--### 1. AI-Powered Knowledge Extraction
+--- **PDF Processing:** Automated text extraction from uploaded study materials using `pdf-parse`.
+--- **Dynamic Dungeon Generation:** Integration with OpenAI to process uploaded materials into structured JSON representing a multi-level dungeon. Each "Floor" or "Level" corresponds to a distinct sub-topic extracted from the document.
+--- **Question Types:** Generates three types of challenges (Multiple Choice, True/False, Enumeration) based on user selection. Strict Zod schemas ensure consistent AI responses.
+--
+--### 2. Tactical RPG Combat Engine
+--- **Multi-Level Progression:** Dungeons are split into floors. Clearing a floor triggers a visual descent to the next level, fighting a sequence of thematic enemies.
+--- **Battle Mechanics:** Players engage in turn-based combat against AI "Bosses" (e.g., The Academic Overlord).
+--- **Damage System:** 
+--  - **Attack:** Correct answers deal damage to enemies.
+--  - **Defense:** Incorrect answers result in health loss for the player, mitigated by defense stats.
+--- **Combo & Ultimate:** Successive correct answers build a combo meter, increasing damage and charging a powerful "Ultimate" ability.
+--
+--### 3. Character Progression & Customization
+--- **Modular Character Creator:** Customize gender, skin tone, hair style, and modular facial features (optics, mouth, etc.).
+--- **Dynamic Sprite Rendering:** The `CharacterPreview` engine dynamically composites sprites, correctly applying gender-specific fitted armor sprites (e.g., `male-2.png`, `female-2.png`) while keeping generic high-res icons (e.g., `sentinel_armor.png`) for UI elements like The Forge.
+--- **Leveling System:** Earn XP through study sessions to level up and gain skill points to upgrade Attack and Defense.
+--- **The Forge (Crafting):** 
+--  - Collect loot fragments from victories.
+--  - **High-Fidelity Visual Previews:** Real-time rendering of high-quality item assets (e.g., Sentinel Plating) during the compilation process.
+--  - Craft advanced weapons and armor to improve system stability and output.
+--
+--### 4. Exploration & Review
+--- **Mission Briefing/Debriefing:** Thematic UI framing the start and end of a dungeon run, now displaying the multi-level structure and overall title generated by the AI.
+--- **Intel Log:** A detailed review system that tracks "mistakes" (wrong answers), providing rationales and correct answers for post-battle analysis.
+--
+-----
+--
+--## Technical Stack
+--- **Framework:** Next.js (App Router)
+--- **Styling:** Tailwind CSS & Framer Motion (for high-fidelity animations)
+--- **State Management:** Zustand (with persistence and multi-level progression tracking)
+--- **Backend/Database:** Supabase
+--- **AI Integration:** OpenAI SDKs with strict JSON Schema Validation (Zod)
+--- **Icons:** Lucide-React
+--
+-----
+--
+--## Implementation Status (Summary)
+--- [x] **Core Game Loop:** Battle system, health management, and wave transitions.
+--- [x] **AI Integration:** Multi-level dungeon generation pipeline using structured outputs.
+--- [x] **State Management:** Multi-level progression tracking and state resets.
+--- [x] **Progression:** Leveling, XP, and stat upgrading.
+--- [x] **Crafting:** The Forge interface with accurate generic asset rendering.
+--- [x] **UI/UX:** Responsive layouts, accurate gendered character previews, and animated floor transitions.
+--- [ ] **Multiplayer/Social:** (Planned/Future)
+--- [ ] **Cloud Sync:** (Work in progress via Supabase)
+-diff --git a/README.md b/README.md
+-index e215bc4..23b9529 100644
+---- a/README.md
+-+++ b/README.md
+-@@ -1,36 +1,117 @@
+--This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+-+# ⚔️ ReviewQuest
+- 
+--## Getting Started
+-+**Turn your study materials into a boss battle.**
+- 
+--First, run the development server:
+-+ReviewQuest is a gamified study app. Upload a PDF, and AI turns it into a multi-floor sci-fi dungeon where **knowledge is your weapon**. Answer correctly to damage enemies, answer wrong and you take damage. Every mistake is saved to an Intel Log so you can review exactly what you missed.
+-+
+-+<!-- TODO: add a screenshot or GIF of a battle here, e.g. ![ReviewQuest battle](docs/screenshots/battle.png) -->
+-+
+-+## ✨ Features
+-+
+-+**AI dungeon generation**
+-+- Upload a PDF and the text is extracted and split into sub-topics. Each topic becomes a floor.
+-+- Three question types: **Multiple Choice**, **True/False**, and **Enumeration**.
+-+- AI output is validated with strict [Zod](https://zod.dev) schemas before it reaches the game.
+-+- Automatic provider failover: **Gemini → Groq → OpenRouter**, so free-tier rate limits don't end your session.
+-+
+-+**Combat**
+-+- Turn-based fights against thematic bosses, floor by floor, with animated descents between levels.
+-+- Correct answers deal damage; wrong answers cost HP, reduced by your Defense stat.
+-+- Build a **combo meter** to boost damage and charge an **Ultimate**.
+-+
+-+**Progression**
+-+- Earn XP, level up, and spend skill points on Attack and Defense.
+-+- **The Forge:** collect loot fragments and craft weapons and armor.
+-+- **Character creator:** gender, skin tone, hair, and facial features, composited into a live sprite.
+-+- Pets with sound effects.
+-+
+-+**Review**
+-+- **Intel Log** lists every wrong answer with the correct answer and a rationale.
+-+- Mission Briefing and Debrief screens frame each run.
+-+
+-+## 🧰 Tech stack
+-+
+-+| Area | Tools |
+-+| --- | --- |
+-+| Framework | [Next.js 16](https://nextjs.org) (App Router), React 19, TypeScript |
+-+| Styling & motion | Tailwind CSS 4, Framer Motion, Lucide icons |
+-+| State | Zustand (persisted) |
+-+| Validation | Zod |
+-+| AI | OpenAI SDK pointed at Gemini, Groq, and OpenRouter (OpenAI-compatible endpoints) |
+-+| PDF parsing | `pdfjs-dist` (server-side) |
+-+| Backend / DB | Supabase (optional, work in progress) |
+-+
+-+## 🚀 Getting started
+-+
+-+### Prerequisites
+-+- **Node.js 20.9+** (required by Next.js 16)
+-+- At least **one** free AI API key: [Gemini](https://aistudio.google.com/apikey), [Groq](https://console.groq.com/keys), or [OpenRouter](https://openrouter.ai/keys)
+-+
+-+### Setup
+- 
+- ```bash
+-+git clone https://github.com/jy-crnz/Review-Quest.git
+-+cd Review-Quest
+-+npm install
+-+cp .env.example .env.local   # then add your API key(s)
+- npm run dev
+--# or
+--yarn dev
+--# or
+--pnpm dev
+--# or
+--bun dev
+- ```
+- 
+--Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+-+Open [http://localhost:3000](http://localhost:3000).
+-+
+-+### Environment variables
+- 
+--You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+-+| Variable | Required | Purpose |
+-+| --- | --- | --- |
+-+| `GEMINI_API_KEY` | One of the three AI keys | Primary AI provider |
+-+| `GROQ_API_KEY` | One of the three AI keys | First fallback |
+-+| `OPENROUTER_API_KEY` | One of the three AI keys | Second fallback |
+-+| `GEMINI_MODEL` | No | Default `gemini-2.5-flash` |
+-+| `GROQ_MODEL` | No | Default `openai/gpt-oss-120b` |
+-+| `AI_MODEL` | No | OpenRouter model, default `google/gemini-2.5-flash-lite` |
+-+| `NEXT_PUBLIC_SUPABASE_URL` | No | Cloud sync (not wired up yet) |
+-+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | No | Cloud sync (not wired up yet) |
+- 
+--This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+-+See [`.env.example`](.env.example) for a ready-to-copy template.
+- 
+--## Learn More
+-+### Scripts
+- 
+--To learn more about Next.js, take a look at the following resources:
+-+| Command | What it does |
+-+| --- | --- |
+-+| `npm run dev` | Start the dev server |
+-+| `npm run build` | Production build |
+-+| `npm start` | Run the production build |
+-+| `npm run lint` | Lint with ESLint |
+-+
+-+## 🗂️ Project structure
+-+
+-+```
+-+src/
+-+├── app/              # Next.js routes and API handlers (extract, syllabus, generate, generate-stage)
+-+├── features/
+-+│   ├── game/         # Battle, character, forge, map: components, services, Zustand store
+-+│   ├── upload/       # File upload UI
+-+│   └── dashboard/    # XP bar, level-up and run-summary modals
+-+└── lib/              # Zod schemas, AI client, answer matching, Supabase client
+-+```
+- 
+--- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+--- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+-+For design principles and layering, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- 
+--You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+-+## ⚠️ Known limitations
+- 
+--## Deploy on Vercel
+-+- **PDF only.** The upload field accepts `.pptx`, but extraction currently uses PDF.js, so PowerPoint files will fail.
+-+- **No auth or rate limiting on API routes yet.** Don't expose a deployment publicly with your own API keys until this is added.
+-+- **Cloud sync is unfinished.** Progress is stored locally in the browser.
+- 
+--The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+-+## 🗺️ Roadmap
+- 
+--Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+-+- [x] Core game loop (battle, HP, floor transitions)
+-+- [x] Multi-level AI dungeon generation
+-+- [x] XP, leveling, and stat upgrades
+-+- [x] The Forge crafting
+-+- [x] Character creator and sprite compositing
+-+- [ ] PPTX support
+-+- [ ] API route hardening (input limits, rate limiting)
+-+- [ ] Automated tests
+-+- [ ] Cloud sync with Supabase Auth and Row Level Security
+-+- [ ] Multiplayer / social features
+-diff --git a/README1.md b/README1.md
+-deleted file mode 100644
+-index ac5df8b..0000000
+---- a/README1.md
+-+++ /dev/null
+-@@ -1,70 +0,0 @@
+--# ⚔️ ReviewQuest
+--**The Academic Boss Battle**
+--
+--ReviewQuest is a gamified study platform designed for IT students to transform dense academic materials (PDFs/PPTs) into interactive "Boss Battle" simulations. Using AI-driven active recall and strict architectural standards, it turns exam preparation into a rewarding quest.
+--
+-----
+--
+--## 🏗️ Architecture & Core Principles
+--This project is built with the guiding principle: **"Architecture is Kindness to my Future Self."** It follows a strict **Layered Separation** to ensure that logic, data, and presentation never tangle.
+--
+--### 1. Layered Structure (Step 2)
+--* **Presentation Layer (`/src/features/*/components`):** Pure UI components driven by Tailwind CSS. Logic-agnostic and focused on user interaction.
+--* **Logic Layer (`/src/features/*/store.ts` & `/services`):** Global state managed via Zustand and AI orchestration services.
+--* **Data Access Layer (`/src/lib/schemas.ts`):** Strict Zod schemas acting as the **Single Source of Truth** for all entities.
+--* **Infrastructure Layer (`/src/lib/supabase.ts`):** Configuration for external services, API clients, and environment boundaries.
+--
+--### 2. Engineering Standards (Step 3 & 5)
+--* **Token-Driven UI:** No hardcoded hex codes. All colors (Player HP, Boss HP, XP Gold) and spacing (4px/8px scale) use CSS variables defined in `globals.css`.
+--* **Validation at Boundaries:** All data entering the system—from AI-generated JSON to user-uploaded files—is parsed and validated via Zod before reaching the UI.
+--* **Guard Clauses Over Nested Ifs:** Functions prioritize early returns to ensure code readability and prevent silent failures.
+--* **Performance Budget:** Optimized for a snappy experience. Initial JS < 200KB. LCP < 2.5s utilizing **Loading Skeletons** to maintain UI stability during AI generation.
+--
+-----
+--
+--## 🚀 Technical Stack
+--* **Framework:** Next.js 14 (App Router)
+--* **Language:** TypeScript (Strict Mode)
+--* **State Management:** Zustand (Local-first with persistence support)
+--* **Schema Validation:** Zod
+--* **Database & Auth:** Supabase (PostgreSQL)
+--* **Styling:** Tailwind CSS + Lucide Icons
+--* **Utilities:** `clsx` + `tailwind-merge` for safe class manipulation.
+--
+-----
+--
+--## 🛠️ Getting Started
+--
+--### 1. Prerequisites
+--* Node.js (v18+)
+--* A Supabase Project
+--
+--### 2. Environment Setup
+--Create a `.env.local` file in the root directory:
+--```text
+--NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+--NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+--
+--## 3. Installation
+--PowerShell
+--# Navigate to the project folder
+--cd reviewquest
+--
+--# Install dependencies
+--npm install
+--4. Development
+--PowerShell
+--npm run dev
+--✅ Definition of Done (Step 7 Checklist)
+--[x] Feature-First Organization: Files grouped by feature (auth/, game/, upload/) rather than technical type.
+--
+--[x] Gamification Engine: XP calculation and Level-Up triggers encapsulated in the Logic Layer.
+--
+--[x] UI Resilience: Loading Skeletons implemented to prevent layout shift.
+--
+--[x] Type Safety: Zero any types; all interfaces are inferred directly from Zod schemas.
+--
+--[x] A11y Standards: Semantic HTML, keyboard operable, and visible focus indicators using --focus-ring.
+--
+--📜 Project Vision
+--ReviewQuest aims to reduce the cognitive load of studying by applying RPG mechanics to learning. By validating every boundary and maintaining a clean separation of concerns, the codebase remains a "kindness" to developers and a powerful tool for students.
+-\ No newline at end of file
+-diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+-new file mode 100644
+-index 0000000..4fb475c
+---- /dev/null
+-+++ b/docs/ARCHITECTURE.md
+-@@ -0,0 +1,48 @@
+-+# Architecture & Engineering Standards
+-+
+-+> Guiding principle: **"Architecture is kindness to my future self."**
+-+
+-+ReviewQuest uses feature-first organization with a layered separation, so logic, data, and presentation don't tangle.
+-+
+-+## Layers
+-+
+-+| Layer | Location | Responsibility |
+-+| --- | --- | --- |
+-+| Presentation | `src/features/*/components` | UI components styled with Tailwind. Keep business logic out. |
+-+| Logic | `src/features/*/store.ts`, `src/features/*/services` | Zustand state and AI orchestration services. |
+-+| Data / schemas | `src/lib/schemas.ts` | Zod schemas as the single source of truth for entities. |
+-+| Infrastructure | `src/lib/multiAiClient.ts`, `src/lib/supabase.ts` | External clients and environment boundaries. |
+-+| Routes | `src/app/api/*` | Thin HTTP handlers that call the service layer. |
+-+
+-+## Request flow
+-+
+-+1. **`/api/extract`**: the uploaded PDF is parsed server-side with `pdfjs-dist`, and the text is normalized.
+-+2. **`/api/syllabus`**: the text is split into sub-topics (one per floor).
+-+3. **`/api/generate` / `/api/generate-stage`**: AI generates the boss and its questions for the chosen quiz type.
+-+4. **`multiAiClient`** sends each request to Gemini, falling back to Groq and then OpenRouter on failure or timeout.
+-+5. Responses are validated with Zod before reaching the game store.
+-+
+-+## Standards
+-+
+-+- **Validate at boundaries.** AI JSON and user input are parsed with Zod before use.
+-+- **Guard clauses over nested ifs.** Return early.
+-+- **Token-driven UI.** Colors and spacing come from CSS variables in `globals.css`, not hardcoded hex values.
+-+- **Feature-first folders.** Group by feature (`game/`, `upload/`, `dashboard/`), not by file type.
+-+- **Loading skeletons** during AI generation to avoid layout shift.
+-+- **Accessibility.** Semantic HTML, keyboard operability, and visible focus rings.
+-+
+-+## Targets (aspirational, not yet measured)
+-+
+-+- Initial JS under 200 KB
+-+- LCP under 2.5 s
+-+- Zero `any` types (currently ~16 `as any` / `@ts-ignore` remain; see the cleanup checklist)
+-+
+-+## Status
+-+
+-+| Area | State |
+-+| --- | --- |
+-+| Core game loop | Done |
+-+| AI generation pipeline | Done |
+-+| Progression and crafting | Done |
+-+| Cloud sync (Supabase) | In progress: `scoreService` exists but is not called yet |
+-+| Multiplayer / social | Planned |
+-diff --git a/package-lock.json b/package-lock.json
+-index c6095c6..6412c9d 100644
+---- a/package-lock.json
+-+++ b/package-lock.json
+-@@ -8,15 +8,12 @@
+-       "name": "reviewquest",
+-       "version": "0.1.0",
+-       "dependencies": {
+--        "@google/generative-ai": "^0.24.1",
+-         "@supabase/supabase-js": "^2.100.0",
+--        "@tanstack/react-query": "^5.95.2",
+-         "clsx": "^2.1.1",
+-         "framer-motion": "^12.38.0",
+-         "lucide-react": "^1.7.0",
+-         "next": "16.2.1",
+-         "openai": "^6.33.0",
+--        "pdf-parse": "^2.4.5",
+-         "pdfjs-dist": "^5.5.207",
+-         "react": "19.2.4",
+-         "react-dom": "19.2.4",
+-@@ -469,15 +466,6 @@
+-         "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
+-       }
+-     },
+--    "node_modules/@google/generative-ai": {
+--      "version": "0.24.1",
+--      "resolved": "https://registry.npmjs.org/@google/generative-ai/-/generative-ai-0.24.1.tgz",
+--      "integrity": "sha512-MqO+MLfM6kjxcKoy0p1wRzG3b4ZZXtPI+z2IE26UogS2Cm/XHO+7gGRBh6gcJsOiIVoH93UwKvW4HdgiOZCy9Q==",
+--      "license": "Apache-2.0",
+--      "engines": {
+--        "node": ">=18.0.0"
+--      }
+--    },
+-     "node_modules/@humanfs/core": {
+-       "version": "0.19.1",
+-       "resolved": "https://registry.npmjs.org/@humanfs/core/-/core-0.19.1.tgz",
+-@@ -623,9 +611,6 @@
+-       "cpu": [
+-         "arm"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -642,9 +627,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -661,9 +643,6 @@
+-       "cpu": [
+-         "ppc64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -680,9 +659,6 @@
+-       "cpu": [
+-         "riscv64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -699,9 +675,6 @@
+-       "cpu": [
+-         "s390x"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -718,9 +691,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -737,9 +707,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -756,9 +723,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "LGPL-3.0-or-later",
+-       "optional": true,
+-       "os": [
+-@@ -775,9 +739,6 @@
+-       "cpu": [
+-         "arm"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -800,9 +761,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -825,9 +783,6 @@
+-       "cpu": [
+-         "ppc64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -850,9 +805,6 @@
+-       "cpu": [
+-         "riscv64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -875,9 +827,6 @@
+-       "cpu": [
+-         "s390x"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -900,9 +849,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -925,9 +871,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -950,9 +893,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "Apache-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -1094,189 +1034,6 @@
+-         "@jridgewell/sourcemap-codec": "^1.4.14"
+-       }
+-     },
+--    "node_modules/@napi-rs/canvas": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas/-/canvas-0.1.80.tgz",
+--      "integrity": "sha512-DxuT1ClnIPts1kQx8FBmkk4BQDTfI5kIzywAaMjQSXfNnra5UFU9PwurXrl+Je3bJ6BGsp/zmshVVFbCmyI+ww==",
+--      "license": "MIT",
+--      "workspaces": [
+--        "e2e/*"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      },
+--      "optionalDependencies": {
+--        "@napi-rs/canvas-android-arm64": "0.1.80",
+--        "@napi-rs/canvas-darwin-arm64": "0.1.80",
+--        "@napi-rs/canvas-darwin-x64": "0.1.80",
+--        "@napi-rs/canvas-linux-arm-gnueabihf": "0.1.80",
+--        "@napi-rs/canvas-linux-arm64-gnu": "0.1.80",
+--        "@napi-rs/canvas-linux-arm64-musl": "0.1.80",
+--        "@napi-rs/canvas-linux-riscv64-gnu": "0.1.80",
+--        "@napi-rs/canvas-linux-x64-gnu": "0.1.80",
+--        "@napi-rs/canvas-linux-x64-musl": "0.1.80",
+--        "@napi-rs/canvas-win32-x64-msvc": "0.1.80"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-android-arm64": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-android-arm64/-/canvas-android-arm64-0.1.80.tgz",
+--      "integrity": "sha512-sk7xhN/MoXeuExlggf91pNziBxLPVUqF2CAVnB57KLG/pz7+U5TKG8eXdc3pm0d7Od0WreB6ZKLj37sX9muGOQ==",
+--      "cpu": [
+--        "arm64"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "android"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-darwin-arm64": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-darwin-arm64/-/canvas-darwin-arm64-0.1.80.tgz",
+--      "integrity": "sha512-O64APRTXRUiAz0P8gErkfEr3lipLJgM6pjATwavZ22ebhjYl/SUbpgM0xcWPQBNMP1n29afAC/Us5PX1vg+JNQ==",
+--      "cpu": [
+--        "arm64"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "darwin"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-darwin-x64": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-darwin-x64/-/canvas-darwin-x64-0.1.80.tgz",
+--      "integrity": "sha512-FqqSU7qFce0Cp3pwnTjVkKjjOtxMqRe6lmINxpIZYaZNnVI0H5FtsaraZJ36SiTHNjZlUB69/HhxNDT1Aaa9vA==",
+--      "cpu": [
+--        "x64"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "darwin"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-arm-gnueabihf": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm-gnueabihf/-/canvas-linux-arm-gnueabihf-0.1.80.tgz",
+--      "integrity": "sha512-eyWz0ddBDQc7/JbAtY4OtZ5SpK8tR4JsCYEZjCE3dI8pqoWUC8oMwYSBGCYfsx2w47cQgQCgMVRVTFiiO38hHQ==",
+--      "cpu": [
+--        "arm"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-arm64-gnu": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm64-gnu/-/canvas-linux-arm64-gnu-0.1.80.tgz",
+--      "integrity": "sha512-qwA63t8A86bnxhuA/GwOkK3jvb+XTQaTiVML0vAWoHyoZYTjNs7BzoOONDgTnNtr8/yHrq64XXzUoLqDzU+Uuw==",
+--      "cpu": [
+--        "arm64"
+--      ],
+--      "libc": [
+--        "glibc"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-arm64-musl": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm64-musl/-/canvas-linux-arm64-musl-0.1.80.tgz",
+--      "integrity": "sha512-1XbCOz/ymhj24lFaIXtWnwv/6eFHXDrjP0jYkc6iHQ9q8oXKzUX1Lc6bu+wuGiLhGh2GS/2JlfORC5ZcXimRcg==",
+--      "cpu": [
+--        "arm64"
+--      ],
+--      "libc": [
+--        "musl"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-riscv64-gnu": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-riscv64-gnu/-/canvas-linux-riscv64-gnu-0.1.80.tgz",
+--      "integrity": "sha512-XTzR125w5ZMs0lJcxRlS1K3P5RaZ9RmUsPtd1uGt+EfDyYMu4c6SEROYsxyatbbu/2+lPe7MPHOO/0a0x7L/gw==",
+--      "cpu": [
+--        "riscv64"
+--      ],
+--      "libc": [
+--        "glibc"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-x64-gnu": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-x64-gnu/-/canvas-linux-x64-gnu-0.1.80.tgz",
+--      "integrity": "sha512-BeXAmhKg1kX3UCrJsYbdQd3hIMDH/K6HnP/pG2LuITaXhXBiNdh//TVVVVCBbJzVQaV5gK/4ZOCMrQW9mvuTqA==",
+--      "cpu": [
+--        "x64"
+--      ],
+--      "libc": [
+--        "glibc"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+--    "node_modules/@napi-rs/canvas-linux-x64-musl": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-x64-musl/-/canvas-linux-x64-musl-0.1.80.tgz",
+--      "integrity": "sha512-x0XvZWdHbkgdgucJsRxprX/4o4sEed7qo9rCQA9ugiS9qE2QvP0RIiEugtZhfLH3cyI+jIRFJHV4Fuz+1BHHMg==",
+--      "cpu": [
+--        "x64"
+--      ],
+--      "libc": [
+--        "musl"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "linux"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+-     "node_modules/@napi-rs/canvas-win32-arm64-msvc": {
+-       "version": "0.1.97",
+-       "resolved": "https://registry.npmjs.org/@napi-rs/canvas-win32-arm64-msvc/-/canvas-win32-arm64-msvc-0.1.97.tgz",
+-@@ -1297,22 +1054,6 @@
+-         "url": "https://github.com/sponsors/Brooooooklyn"
+-       }
+-     },
+--    "node_modules/@napi-rs/canvas-win32-x64-msvc": {
+--      "version": "0.1.80",
+--      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-win32-x64-msvc/-/canvas-win32-x64-msvc-0.1.80.tgz",
+--      "integrity": "sha512-Z8jPsM6df5V8B1HrCHB05+bDiCxjE9QA//3YrkKIdVDEwn5RKaqOxCJDRJkl48cJbylcrJbW4HxZbTte8juuPg==",
+--      "cpu": [
+--        "x64"
+--      ],
+--      "license": "MIT",
+--      "optional": true,
+--      "os": [
+--        "win32"
+--      ],
+--      "engines": {
+--        "node": ">= 10"
+--      }
+--    },
+-     "node_modules/@napi-rs/wasm-runtime": {
+-       "version": "0.2.12",
+-       "resolved": "https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-0.2.12.tgz",
+-@@ -1381,9 +1122,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1400,9 +1138,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1419,9 +1154,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1438,9 +1170,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1765,9 +1494,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1785,9 +1511,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1805,9 +1528,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1825,9 +1545,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -1915,32 +1632,6 @@
+-         "tailwindcss": "4.2.2"
+-       }
+-     },
+--    "node_modules/@tanstack/query-core": {
+--      "version": "5.95.2",
+--      "resolved": "https://registry.npmjs.org/@tanstack/query-core/-/query-core-5.95.2.tgz",
+--      "integrity": "sha512-o4T8vZHZET4Bib3jZ/tCW9/7080urD4c+0/AUaYVpIqOsr7y0reBc1oX3ttNaSW5mYyvZHctiQ/UOP2PfdmFEQ==",
+--      "license": "MIT",
+--      "funding": {
+--        "type": "github",
+--        "url": "https://github.com/sponsors/tannerlinsley"
+--      }
+--    },
+--    "node_modules/@tanstack/react-query": {
+--      "version": "5.95.2",
+--      "resolved": "https://registry.npmjs.org/@tanstack/react-query/-/react-query-5.95.2.tgz",
+--      "integrity": "sha512-/wGkvLj/st5Ud1Q76KF1uFxScV7WeqN1slQx5280ycwAyYkIPGaRZAEgHxe3bjirSd5Zpwkj6zNcR4cqYni/ZA==",
+--      "license": "MIT",
+--      "dependencies": {
+--        "@tanstack/query-core": "5.95.2"
+--      },
+--      "funding": {
+--        "type": "github",
+--        "url": "https://github.com/sponsors/tannerlinsley"
+--      },
+--      "peerDependencies": {
+--        "react": "^18 || ^19"
+--      }
+--    },
+-     "node_modules/@tybys/wasm-util": {
+-       "version": "0.10.1",
+-       "resolved": "https://registry.npmjs.org/@tybys/wasm-util/-/wasm-util-0.10.1.tgz",
+-@@ -2419,9 +2110,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2436,9 +2124,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2453,9 +2138,6 @@
+-         "ppc64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2470,9 +2152,6 @@
+-         "riscv64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2487,9 +2166,6 @@
+-         "riscv64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2504,9 +2180,6 @@
+-         "s390x"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2521,9 +2194,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -2538,9 +2208,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -5227,9 +4894,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MPL-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -5251,9 +4915,6 @@
+-         "arm64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MPL-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -5275,9 +4936,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MPL-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -5299,9 +4957,6 @@
+-         "x64"
+-       ],
+-       "dev": true,
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MPL-2.0",
+-       "optional": true,
+-       "os": [
+-@@ -5908,38 +5563,6 @@
+-       "dev": true,
+-       "license": "MIT"
+-     },
+--    "node_modules/pdf-parse": {
+--      "version": "2.4.5",
+--      "resolved": "https://registry.npmjs.org/pdf-parse/-/pdf-parse-2.4.5.tgz",
+--      "integrity": "sha512-mHU89HGh7v+4u2ubfnevJ03lmPgQ5WU4CxAVmTSh/sxVTEDYd1er/dKS/A6vg77NX47KTEoihq8jZBLr8Cxuwg==",
+--      "license": "Apache-2.0",
+--      "dependencies": {
+--        "@napi-rs/canvas": "0.1.80",
+--        "pdfjs-dist": "5.4.296"
+--      },
+--      "bin": {
+--        "pdf-parse": "bin/cli.mjs"
+--      },
+--      "engines": {
+--        "node": ">=20.16.0 <21 || >=22.3.0"
+--      },
+--      "funding": {
+--        "type": "github",
+--        "url": "https://github.com/sponsors/mehmet-kozan"
+--      }
+--    },
+--    "node_modules/pdf-parse/node_modules/pdfjs-dist": {
+--      "version": "5.4.296",
+--      "resolved": "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-5.4.296.tgz",
+--      "integrity": "sha512-DlOzet0HO7OEnmUmB6wWGJrrdvbyJKftI1bhMitK7O2N8W2gc757yyYBbINy9IDafXAV9wmKr9t7xsTaNKRG5Q==",
+--      "license": "Apache-2.0",
+--      "engines": {
+--        "node": ">=20.16.0 || >=22.3.0"
+--      },
+--      "optionalDependencies": {
+--        "@napi-rs/canvas": "^0.1.80"
+--      }
+--    },
+-     "node_modules/pdfjs-dist": {
+-       "version": "5.5.207",
+-       "resolved": "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-5.5.207.tgz",
+-@@ -6070,9 +5693,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -6093,9 +5713,6 @@
+-       "cpu": [
+-         "arm64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -6116,9 +5733,6 @@
+-       "cpu": [
+-         "riscv64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -6139,9 +5753,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "glibc"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-@@ -6162,9 +5773,6 @@
+-       "cpu": [
+-         "x64"
+-       ],
+--      "libc": [
+--        "musl"
+--      ],
+-       "license": "MIT",
+-       "optional": true,
+-       "os": [
+-diff --git a/package.json b/package.json
+-index fc05c1a..80f33ea 100644
+---- a/package.json
+-+++ b/package.json
+-@@ -9,15 +9,12 @@
+-     "lint": "eslint"
+-   },
+-   "dependencies": {
+--    "@google/generative-ai": "^0.24.1",
+-     "@supabase/supabase-js": "^2.100.0",
+--    "@tanstack/react-query": "^5.95.2",
+-     "clsx": "^2.1.1",
+-     "framer-motion": "^12.38.0",
+-     "lucide-react": "^1.7.0",
+-     "next": "16.2.1",
+-     "openai": "^6.33.0",
+--    "pdf-parse": "^2.4.5",
+-     "pdfjs-dist": "^5.5.207",
+-     "react": "19.2.4",
+-     "react-dom": "19.2.4",
+-diff --git a/src/features/reviewer/services/aiGenerator.ts b/src/features/reviewer/services/aiGenerator.ts
+-deleted file mode 100644
+-index b361e59..0000000
+---- a/src/features/reviewer/services/aiGenerator.ts
+-+++ /dev/null
+-@@ -1,126 +0,0 @@
+--import { z } from "zod";
+--import { QuizSchema, QuizQuestion } from "@/lib/schemas";
+--import { QuizType } from "@/features/game/store"; // Ensure this import path is correct
+--import { v4 as uuidv4 } from "uuid";
+--import OpenAI from "openai";
+--
+--/**
+-- * AI Service Configuration
+-- * Standard: OpenRouter integration with Gemini 2.0 Flash for speed and accuracy.
+-- */
+--const openai = new OpenAI({
+--    baseURL: "https://openrouter.ai/api/v1",
+--    apiKey: process.env.OPENROUTER_API_KEY || "",
+--    defaultHeaders: {
+--        "HTTP-Referer": "http://localhost:3000",
+--        "X-Title": "ReviewQuest",
+--    }
+--});
+--
+--/**
+-- * AI Engine: Intelligence Gathering
+-- * Architecture: Parameterized generation based on Dungeon Quiz Type.
+-- */
+--export const generateQuizFromContent = async (
+--    rawContent: string,
+--    materialId: string,
+--    quizType: QuizType = 'multiple-choice' // NEW: Challenge-aware parameter
+--): Promise<z.infer<typeof QuizSchema>> => {
+--
+--    // 1. Guard Clause: Validation Boundary
+--    if (!rawContent || rawContent.length < 50) {
+--        throw new Error("Insufficient intel. Material is too sparse for extraction.");
+--    }
+--
+--    // 2. Tactical Instruction Mapping
+--    const challengeInstructions = {
+--        'multiple-choice': "Generate 15 challenging multiple-choice questions. Each must have 4 distinct options.",
+--        'true-false': "Generate 15 True/False questions. The 'options' array must be strictly ['True', 'False'].",
+--        'enumeration': "Generate 15 identification questions. The correct answer must be a specific term or phrase from the text. Provide 3 incorrect distractors as well."
+--    };
+--
+--    try {
+--        const prompt = `
+--            You are the "Master of Intel" in a gamified learning RPG. 
+--            Target Challenge Mode: ${quizType.toUpperCase()}
+--
+--            TASK:
+--            1. Analyze the Context Material provided.
+--            2. Identify the core Subject (e.g., "IT", "Nursing", "Law").
+--            3. Create a creative Boss Name and an intimidating Encounter Taunt.
+--            4. ${challengeInstructions[quizType]}
+--
+--            STRICT JSON SCHEMA:
+--            {
+--              "subject": "string",
+--              "bossName": "string",
+--              "bossQuote": "string",
+--              "questions": [
+--                {
+--                  "q": "string",
+--                  "options": ["string", "string", "string", "string"],
+--                  "correctIdx": number,
+--                  "explanation": "string"
+--                }
+--              ]
+--            }
+--
+--            CONTEXT MATERIAL:
+--            ${rawContent.substring(0, 12000)}
+--        `;
+--
+--        // 3. Logic Layer: AI Transmission
+--        const response = await openai.chat.completions.create({
+--            model: process.env.AI_MODEL || "google/gemini-2.5-flash-lite",
+--            max_tokens: 2000,
+--            messages: [
+--                { role: "system", content: "You are a JSON-only tactical engine. You adapt study materials into RPG combat encounters." },
+--                { role: "user", content: prompt }
+--            ],
+--            response_format: { type: "json_object" }
+--        });
+--
+--        const responseText = response.choices[0].message.content;
+--        if (!responseText) throw new Error("EMPTY_DATA_STREAM");
+--
+--        // 4. Sanitization & Normalization
+--        const rawData = JSON.parse(responseText.replace(/```json|```/g, "").trim());
+--
+--        // Ensure questions are valid and handle True/False padding for schema compliance
+--        let normalizedQuestions = (rawData.questions || []).map((q: any) => {
+--            let options = q.options;
+--
+--            // 🛡️ Schema Repair: If T/F, ensure 4 slots exist to satisfy standard Zod schema
+--            if (quizType === 'true-false' && options.length === 2) {
+--                options = [options[0], options[1], "", ""];
+--            }
+--
+--            return {
+--                ...q,
+--                options: options.slice(0, 4) // Ensure exactly 4
+--            };
+--        });
+--
+--        // 5. Final Validation: Architecture is kindness to my future self
+--        const validatedQuiz = QuizSchema.parse({
+--            id: uuidv4(),
+--            reviewerId: materialId,
+--            subject: rawData.subject || "General Intel",
+--            bossName: rawData.bossName || "The Academic Adversary",
+--            bossQuote: rawData.bossQuote || "Prepare for evaluation.",
+--            questions: normalizedQuestions,
+--            createdAt: new Date(),
+--            updatedAt: new Date(),
+--        });
+--
+--        return validatedQuiz;
+--
+--    } catch (error) {
+--        if (error instanceof z.ZodError) {
+--            console.error("DATA_MISMATCH:", error.issues);
+--            throw new Error("The AI generated an invalid combat structure.");
+--        }
+--        console.error("AI_GEN_CRASH:", error);
+--        throw new Error("The Academic Boss jammed the data extraction process.");
+--    }
+--};
+-\ No newline at end of file
+diff --git a/src/app/api/extract/route.ts b/src/app/api/extract/route.ts
+index 2128630..372216b 100644
+--- a/src/app/api/extract/route.ts
++++ b/src/app/api/extract/route.ts
+@@ -1,6 +1,15 @@
+ import { NextResponse } from 'next/server';
+ import path from 'path';
+ import { pathToFileURL } from 'url';
++import { jsonError, rateLimitGuard, readBodyLimited } from '@/lib/api/http';
++import {
++    EXTRACT_TIME_BUDGET_MS,
++    MAX_PDF_PAGES,
++    MAX_STUDY_TEXT_CHARS,
++    MAX_UPLOAD_BYTES,
++    MULTIPART_OVERHEAD_BYTES,
++} from '@/lib/api/limits';
++import { devLog } from '@/lib/logger';
+ 
+ // 1. Engineering Standard: Use the ESM build for Turbopack compatibility
+ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+@@ -16,12 +25,6 @@ if (typeof window === 'undefined') {
+     pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).toString();
+ }
+ 
+-/**
+- * FEATURE: Tactical Payload Capacity
+- * Protocol: 20MB threshold for dense academic PDFs and PPTX conversions.
+- */
+-const MAX_FILE_SIZE = 20 * 1024 * 1024;
+-
+ /**
+  * TEXT LAYOUT NORMALIZATION
+  * Cleans raw extracted PDF text for downstream processing:
+@@ -51,32 +54,61 @@ function normalizeExtractedText(text: string): string {
+     return text.trim();
+ }
+ 
++/**
++ * PDFs start with "%PDF-" (the spec allows up to 1024 bytes of leading junk).
++ * We trust these magic bytes, not the browser-supplied MIME type or filename.
++ */
++function looksLikePdf(bytes: Uint8Array): boolean {
++    const head = Buffer.from(bytes.subarray(0, 1024)).toString('latin1');
++    return head.includes('%PDF-');
++}
++
++function looksLikeZip(bytes: Uint8Array): boolean {
++    // PPTX/DOCX/XLSX are ZIP containers ("PK").
++    return bytes.length > 1 && bytes[0] === 0x50 && bytes[1] === 0x4b;
++}
++
+ export async function POST(req: Request) {
++    const limited = rateLimitGuard(req, 'extract');
++    if (limited) return limited;
++
+     try {
+-        // 🎯 LOGIC: We use formData here because the FileUpload sends a physical file.
+-        const formData = await req.formData();
+-        const file = formData.get('file') as File;
+-
+-        // 1. Boundary Checks: Architecture is kindness to my future self
+-        if (!file) {
+-            return NextResponse.json(
+-                { error: 'No intel file provided. Operation aborted.' },
+-                { status: 400 }
+-            );
++        // 1. Read the body with a hard size cap (never buffers more than the limit).
++        const raw = await readBodyLimited(req, MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES);
++        if (raw === null) {
++            return jsonError('PAYLOAD_TOO_LARGE', 'Intel too dense. Max 20MB limit exceeded.', 413);
+         }
+ 
+-        if (file.size > MAX_FILE_SIZE) {
+-            return NextResponse.json(
+-                { error: `Intel too dense. Max 20MB limit exceeded.` },
+-                { status: 400 }
+-            );
++        // 2. Parse multipart form data from the buffered bytes.
++        let file: FormDataEntryValue | null;
++        try {
++            const formData = await new Response(new Uint8Array(raw), {
++                headers: { 'content-type': req.headers.get('content-type') ?? '' },
++            }).formData();
++            file = formData.get('file');
++        } catch {
++            return jsonError('INVALID_INPUT', 'Upload could not be read. Please try again.', 400);
+         }
+ 
+-        // 2. Data Access: Prepare Buffer for PDF.js
+-        const bytes = await file.arrayBuffer();
+-        const buffer = new Uint8Array(bytes);
++        if (!file || typeof file === 'string') {
++            return jsonError('INVALID_INPUT', 'No intel file provided. Operation aborted.', 400);
++        }
+ 
+-        // 3. Extraction Logic: Server-Side Parsing
++        if (file.size > MAX_UPLOAD_BYTES) {
++            return jsonError('PAYLOAD_TOO_LARGE', 'Intel too dense. Max 20MB limit exceeded.', 413);
++        }
++
++        // 3. Validate the actual file contents, not the declared type.
++        const buffer = new Uint8Array(await file.arrayBuffer());
++
++        if (!looksLikePdf(buffer)) {
++            const message = looksLikeZip(buffer)
++                ? 'PowerPoint (PPTX) files are not supported yet. Please export your slides to PDF and upload that.'
++                : 'Incompatible Intel. Please upload a valid PDF file.';
++            return jsonError('INVALID_FILE', message, 400);
++        }
++
++        // 4. Extraction Logic: Server-Side Parsing
+         const loadingTask = pdfjs.getDocument({
+             data: buffer,
+             disableWorker: true, // Forces extraction on the main server thread for stability
+@@ -86,46 +118,68 @@ export async function POST(req: Request) {
+         } as any);
+ 
+         const pdf = await loadingTask.promise;
+-        let extractedText = "";
+-
+-        // Iterate through all pages to capture total intel
+-        for (let i = 1; i <= pdf.numPages; i++) {
+-            const page = await pdf.getPage(i);
+-            const textContent = await page.getTextContent();
+-
+-            const pageText = textContent.items
+-                .map((item: any) => (item as any).str)
+-                .join(" ");
+ 
+-            extractedText += pageText + "\n";
++        try {
++            let extractedText = "";
++            let truncated = pdf.numPages > MAX_PDF_PAGES;
++            const pagesToRead = Math.min(pdf.numPages, MAX_PDF_PAGES);
++            const startedAt = Date.now();
++
++            // Iterate through pages, stopping early if the text, page, or time budget is exhausted
++            for (let i = 1; i <= pagesToRead; i++) {
++                if (extractedText.length >= MAX_STUDY_TEXT_CHARS || Date.now() - startedAt > EXTRACT_TIME_BUDGET_MS) {
++                    truncated = true;
++                    break;
++                }
++
++                const page = await pdf.getPage(i);
++                const textContent = await page.getTextContent();
++
++                const pageText = textContent.items
++                    .map((item) => ('str' in item ? item.str : ''))
++                    .join(" ");
++
++                extractedText += pageText + "\n";
++            }
++
++            devLog(`\n--- [SCANNER SUCCESS: ${pdf.numPages} PAGES, ${extractedText.length} CHARS${truncated ? ', TRUNCATED' : ''}] ---`);
++
++            // Normalize the raw extracted text, then enforce the hard character cap
++            extractedText = normalizeExtractedText(extractedText);
++            if (extractedText.length > MAX_STUDY_TEXT_CHARS) {
++                extractedText = extractedText.slice(0, MAX_STUDY_TEXT_CHARS);
++                truncated = true;
++            }
++
++            // 5. Content Validation
++            if (!extractedText || extractedText.trim().length < 50) {
++                return jsonError(
++                    'INVALID_FILE',
++                    'This PDF appears to be a scanned image with no selectable text. Please upload a text-based PDF or a typed document.',
++                    400
++                );
++            }
++
++            // 6. Response: Return raw text to be cached in the Store's pendingExtractedText
++            return NextResponse.json({
++                extractedText,
++                pageCount: pdf.numPages,
++                truncated,
++            });
++        } finally {
++            await pdf.destroy();
+         }
++    } catch (error) {
++        const name = (error as { name?: string } | null)?.name;
+ 
+-        // 🔍 Console Log: ReviewQuest Engine Status
+-        console.log(`\n--- [SCANNER SUCCESS: ${pdf.numPages} PAGES EXTRACTED] ---`);
+-
+-        // Normalize the raw extracted text before validation
+-        extractedText = normalizeExtractedText(extractedText);
+-
+-        // 4. Content Validation
+-        if (!extractedText || extractedText.trim().length < 50) {
+-            return NextResponse.json(
+-                { error: 'This PDF appears to be a scanned image with no selectable text. Please upload a text-based PDF or a typed document.' },
+-                { status: 400 }
+-            );
++        if (name === 'PasswordException') {
++            return jsonError('INVALID_FILE', 'This PDF is password-protected. Please remove the password and try again.', 400);
++        }
++        if (name === 'InvalidPDFException' || name === 'FormatError') {
++            return jsonError('INVALID_FILE', 'This PDF appears to be corrupted or invalid.', 400);
+         }
+ 
+-        // 5. Response: Return raw text to be cached in the Store's pendingExtractedText
+-        return NextResponse.json({
+-            extractedText,
+-            pageCount: pdf.numPages
+-        });
+-
+-    } catch (error: any) {
+         console.error('SCANNER_CRASH_DETAILS:', error);
+-
+-        return NextResponse.json(
+-            { error: 'The intel extraction system encountered a critical failure.' },
+-            { status: 500 }
+-        );
++        return jsonError('EXTRACTION_FAILED', 'The intel extraction system encountered a critical failure.', 500);
+     }
+ }
+diff --git a/src/app/api/generate-stage/route.ts b/src/app/api/generate-stage/route.ts
+index 8610a1d..77fba74 100644
+--- a/src/app/api/generate-stage/route.ts
++++ b/src/app/api/generate-stage/route.ts
+@@ -1,28 +1,28 @@
+ import { NextResponse } from 'next/server';
+ import { generateStageQuestions } from '@/features/game/services/stageQuestionService';
++import { jsonError, parseJsonRequest } from '@/lib/api/http';
++import { MAX_STAGE_BODY_BYTES } from '@/lib/api/limits';
++import { GenerateStageRequestSchema } from '@/lib/api/schemas';
++import { devLog } from '@/lib/logger';
+ 
+ export async function POST(req: Request) {
+-    try {
+-        const body = await req.json();
+-        const { stage, quizType } = body;
++    const parsed = await parseJsonRequest(req, {
++        routeKey: 'generate-stage',
++        schema: GenerateStageRequestSchema,
++        maxBytes: MAX_STAGE_BODY_BYTES,
++    });
++    if (!parsed.ok) return parsed.response;
+ 
+-        if (!stage || !stage.items || stage.items.length === 0) {
+-            return NextResponse.json(
+-                { error: { code: 'INVALID_STAGE', message: 'Stage data with items is required.' } },
+-                { status: 400 }
+-            );
+-        }
++    const { stage, quizType } = parsed.data;
+ 
+-        console.log(`--- [JIT ARCHITECT: GENERATING QUESTIONS FOR ${stage.title}] ---`);
+-        const questions = await generateStageQuestions(stage, quizType || 'multiple-choice');
+-        console.log(`--- [JIT SUCCESS: ${questions.length} QUESTIONS READY] ---`);
++    try {
++        devLog(`--- [JIT ARCHITECT: GENERATING QUESTIONS FOR ${stage.title}] ---`);
++        const questions = await generateStageQuestions(stage, quizType);
++        devLog(`--- [JIT SUCCESS: ${questions.length} QUESTIONS READY] ---`);
+ 
+         return NextResponse.json({ questions });
+-    } catch (error: any) {
++    } catch (error) {
+         console.error('STAGE_GENERATION_CRASH:', error);
+-        return NextResponse.json(
+-            { error: { code: 'GENERATION_FAILED', message: error.message || 'Failed to generate stage questions.' } },
+-            { status: 500 }
+-        );
++        return jsonError('GENERATION_FAILED', 'Failed to generate stage questions. Please try again.', 500);
+     }
+ }
+diff --git a/src/app/api/generate/route.ts b/src/app/api/generate/route.ts
+index 053d3f6..0463047 100644
+--- a/src/app/api/generate/route.ts
++++ b/src/app/api/generate/route.ts
+@@ -1,69 +1,35 @@
+ import { NextResponse } from 'next/server';
+ import { generateBossBattle } from '@/features/game/services/aiService';
++import { jsonError, parseJsonRequest } from '@/lib/api/http';
++import { MAX_TEXT_BODY_BYTES } from '@/lib/api/limits';
++import { GenerateRequestSchema } from '@/lib/api/schemas';
++import { devLog } from '@/lib/logger';
+ 
+ /**
+  * ARCHITECTURE: Generation Phase (The Sandbox Architect)
+  * FEATURE: Receives cached text and a specific protocol to manifest the boss.
++ *
++ * NOTE: nothing in the client calls this route anymore (the app uses
++ * /api/syllabus + /api/generate-stage). Consider deleting it.
+  */
+ export async function POST(req: Request) {
+-    try {
+-        // 🎯 THE FIX: Read JSON body instead of FormData.
+-        // The ModeSelector component sends 'text' and 'quizType' as a JSON object.
+-        const body = await req.json();
+-        const { text, quizType } = body;
+-
+-        // 1. Boundary Checks
+-        if (!text || !quizType) {
+-            return NextResponse.json(
+-                { 
+-                    error: { 
+-                        code: 'MISSING_DATA', 
+-                        message: 'Intel text or challenge protocol is missing.' 
+-                    } 
+-                },
+-                { status: 400 }
+-            );
+-        }
+-
+-        // --- 2. Service Layer: AI Generation ---
+-        try {
+-            console.log(`--- [ARCHITECT: BUILDING ${quizType.toUpperCase()} ENCOUNTER] ---`);
+-
+-            // Pass the cached text and the user's chosen mode to the AI generator
+-            const battleData = await generateBossBattle(text, quizType as any);
++    const parsed = await parseJsonRequest(req, {
++        routeKey: 'generate',
++        schema: GenerateRequestSchema,
++        maxBytes: MAX_TEXT_BODY_BYTES,
++    });
++    if (!parsed.ok) return parsed.response;
+ 
+-            console.log(`--- [AI SUCCESS: ${battleData.title} MANIFESTED] ---`);
++    const { text, quizType } = parsed.data;
+ 
+-            // Return the full battle object (subject, boss details, questions)
+-            return NextResponse.json(battleData);
+-
+-        } catch (aiError: any) {
+-            console.error('AI_GENERATION_CRASH:', aiError);
+-            
+-            // Return 503 (Service Unavailable) if the AI fails or produces malformed JSON
+-            return NextResponse.json(
+-                { 
+-                    error: { 
+-                        code: 'AI_FAILED', 
+-                        message: aiError.message || 'The AI Boss successfully jammed the frequency.' 
+-                    } 
+-                },
+-                { status: 503 }
+-            );
+-        }
+-
+-    } catch (error: any) {
+-        console.error('SERVER_CRASH_DETAILS:', error);
+-
+-        // General fallback for protocol or syntax errors
+-        return NextResponse.json(
+-            { 
+-                error: { 
+-                    code: 'SERVER_ERROR', 
+-                    message: 'The Battle Architect encountered a protocol failure.' 
+-                } 
+-            },
+-            { status: 500 }
+-        );
++    try {
++        devLog(`--- [ARCHITECT: BUILDING ${quizType.toUpperCase()} ENCOUNTER] ---`);
++        const battleData = await generateBossBattle(text, quizType);
++        devLog(`--- [AI SUCCESS: ${battleData.title} MANIFESTED] ---`);
++
++        return NextResponse.json(battleData);
++    } catch (error) {
++        console.error('AI_GENERATION_CRASH:', error);
++        return jsonError('AI_FAILED', 'The AI could not generate this encounter. Please try again.', 503);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/app/api/syllabus/route.ts b/src/app/api/syllabus/route.ts
+index b949c77..a79d830 100644
+--- a/src/app/api/syllabus/route.ts
++++ b/src/app/api/syllabus/route.ts
+@@ -1,28 +1,27 @@
+ import { NextResponse } from 'next/server';
+ import { extractReviewerSyllabus } from '@/features/game/services/syllabusService';
++import { jsonError, parseJsonRequest } from '@/lib/api/http';
++import { MAX_TEXT_BODY_BYTES } from '@/lib/api/limits';
++import { SyllabusRequestSchema } from '@/lib/api/schemas';
++import { devLog } from '@/lib/logger';
+ 
+ export async function POST(req: Request) {
+-    try {
+-        const body = await req.json();
+-        const { text } = body;
+-
+-        if (!text || typeof text !== 'string' || text.trim().length < 30) {
+-            return NextResponse.json(
+-                { error: { code: 'INVALID_INPUT', message: 'Insufficient study text for extraction.' } },
+-                { status: 400 }
+-            );
+-        }
++    const parsed = await parseJsonRequest(req, {
++        routeKey: 'syllabus',
++        schema: SyllabusRequestSchema,
++        maxBytes: MAX_TEXT_BODY_BYTES,
++    });
++    if (!parsed.ok) return parsed.response;
+ 
+-        console.log(`--- [SYLLABUS ARCHITECT: DECONSTRUCTING DOCUMENT] ---`);
+-        const syllabus = await extractReviewerSyllabus(text);
+-        console.log(`--- [SYLLABUS SUCCESS: ${syllabus.stages.length} STAGES EXTRACTED] ---`);
++    try {
++        devLog('--- [SYLLABUS ARCHITECT: DECONSTRUCTING DOCUMENT] ---');
++        const syllabus = await extractReviewerSyllabus(parsed.data.text);
++        devLog(`--- [SYLLABUS SUCCESS: ${syllabus.stages.length} STAGES EXTRACTED] ---`);
+ 
+         return NextResponse.json(syllabus);
+-    } catch (error: any) {
++    } catch (error) {
++        // Details stay in server logs; the client only gets a generic message.
+         console.error('SYLLABUS_CRASH:', error);
+-        return NextResponse.json(
+-            { error: { code: 'SYLLABUS_FAILED', message: error.message || 'Failed to extract study syllabus.' } },
+-            { status: 500 }
+-        );
++        return jsonError('SYLLABUS_FAILED', 'Failed to extract study syllabus. Please try again.', 500);
+     }
+ }
+diff --git a/src/features/upload/components/FileUpload.tsx b/src/features/upload/components/FileUpload.tsx
+index a5621c8..c22e36a 100644
+--- a/src/features/upload/components/FileUpload.tsx
++++ b/src/features/upload/components/FileUpload.tsx
+@@ -29,13 +29,12 @@ export const FileUpload = () => {
+         const file = e.target.files?.[0];
+         if (!file) return;
+ 
+-        // 1. Boundary Validation (Type)
+-        const isPdf = file.type === 'application/pdf';
+-        const isPptx = file.name.endsWith('.pptx');
++        // 1. Boundary Validation (Type). The server re-checks the real file contents.
++        const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+ 
+-        if (!isPdf && !isPptx) {
++        if (!isPdf) {
+             setStatus('error');
+-            setErrorMsg("Incompatible Intel. Use PDF or PPTX.");
++            setErrorMsg("Incompatible Intel. Use a PDF file.");
+             return;
+         }
+ 
+@@ -64,7 +63,8 @@ export const FileUpload = () => {
+             const data = await response.json();
+ 
+             if (!response.ok) {
+-                throw new Error(data.error || "Intel Extraction Interrupted.");
++                const message = typeof data.error === 'string' ? data.error : data.error?.message;
++                throw new Error(message || "Intel Extraction Interrupted.");
+             }
+ 
+             // 5. Sandbox Sync
+@@ -116,7 +116,7 @@ export const FileUpload = () => {
+                             )}
+                         </p>
+                         <p className="text-[10px] text-slate-600 uppercase tracking-[0.3em] font-black">
+-                            {status === 'error' ? errorMsg : "PDF / PPTX (MAX. 20MB)"}
++                            {status === 'error' ? errorMsg : "PDF (MAX. 20MB)"}
+                         </p>
+                     </div>
+ 
+@@ -124,7 +124,7 @@ export const FileUpload = () => {
+                         ref={fileInputRef}
+                         type="file"
+                         className="hidden"
+-                        accept=".pdf,.pptx"
++                        accept=".pdf,application/pdf"
+                         onChange={handleFileChange}
+                         disabled={isUploading}
+                     />
+diff --git a/src/lib/api/http.ts b/src/lib/api/http.ts
+new file mode 100644
+index 0000000..12366ef
+--- /dev/null
++++ b/src/lib/api/http.ts
+@@ -0,0 +1,104 @@
++import { NextResponse } from 'next/server';
++import { z } from 'zod';
++import { checkRateLimit } from './rateLimit';
++
++/**
++ * Shared request handling for API routes:
++ *   rate limit -> size-limited body read -> JSON parse -> Zod validation.
++ * Every error uses the same shape: { error: { code, message } }.
++ * Messages are generic on purpose; details go to server logs only.
++ */
++
++export type ApiErrorCode =
++    | 'INVALID_INPUT'
++    | 'INVALID_FILE'
++    | 'PAYLOAD_TOO_LARGE'
++    | 'RATE_LIMITED'
++    | 'AI_FAILED'
++    | 'SYLLABUS_FAILED'
++    | 'GENERATION_FAILED'
++    | 'EXTRACTION_FAILED'
++    | 'SERVER_ERROR';
++
++export function jsonError(
++    code: ApiErrorCode,
++    message: string,
++    status: number,
++    headers?: Record<string, string>
++): NextResponse {
++    return NextResponse.json({ error: { code, message } }, { status, headers });
++}
++
++export function rateLimitGuard(req: Request, routeKey: string): NextResponse | null {
++    const result = checkRateLimit(req, routeKey);
++    if (result.ok) return null;
++    return jsonError(
++        'RATE_LIMITED',
++        `Too many requests. Please wait ${result.retryAfterSeconds}s and try again.`,
++        429,
++        { 'Retry-After': String(result.retryAfterSeconds) }
++    );
++}
++
++/**
++ * Reads the request body but gives up (returns null) as soon as it exceeds
++ * `maxBytes`, so oversized or chunked bodies never get fully buffered.
++ */
++export async function readBodyLimited(req: Request, maxBytes: number): Promise<Buffer | null> {
++    const declared = Number(req.headers.get('content-length'));
++    if (Number.isFinite(declared) && declared > maxBytes) return null;
++    if (!req.body) return Buffer.alloc(0);
++
++    const reader = req.body.getReader();
++    const chunks: Buffer[] = [];
++    let total = 0;
++
++    while (true) {
++        const { done, value } = await reader.read();
++        if (done) break;
++        total += value.byteLength;
++        if (total > maxBytes) {
++            await reader.cancel();
++            return null;
++        }
++        chunks.push(Buffer.from(value));
++    }
++    return Buffer.concat(chunks);
++}
++
++type ParseResult<S extends z.ZodType> =
++    | { ok: true; data: z.output<S> }
++    | { ok: false; response: NextResponse };
++
++export async function parseJsonRequest<S extends z.ZodType>(
++    req: Request,
++    opts: { routeKey: string; schema: S; maxBytes: number }
++): Promise<ParseResult<S>> {
++    const limited = rateLimitGuard(req, opts.routeKey);
++    if (limited) return { ok: false, response: limited };
++
++    const raw = await readBodyLimited(req, opts.maxBytes);
++    if (raw === null) {
++        return {
++            ok: false,
++            response: jsonError('PAYLOAD_TOO_LARGE', 'Request is too large.', 413),
++        };
++    }
++
++    let json: unknown;
++    try {
++        json = JSON.parse(raw.toString('utf8'));
++    } catch {
++        return { ok: false, response: jsonError('INVALID_INPUT', 'Request body must be valid JSON.', 400) };
++    }
++
++    const parsed = opts.schema.safeParse(json);
++    if (!parsed.success) {
++        return {
++            ok: false,
++            response: jsonError('INVALID_INPUT', 'Request is missing required data or has invalid fields.', 400),
++        };
++    }
++
++    return { ok: true, data: parsed.data };
++}
+diff --git a/src/lib/api/limits.ts b/src/lib/api/limits.ts
+new file mode 100644
+index 0000000..e8f4c39
+--- /dev/null
++++ b/src/lib/api/limits.ts
+@@ -0,0 +1,29 @@
++/**
++ * Central limits for the API routes. Keep them in one place so the client,
++ * the routes, and the docs can't drift apart.
++ */
++
++/** Max PDF upload size. Mirrored in FileUpload.tsx. */
++export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
++
++/** Extra room for multipart boundaries/headers on top of the file itself. */
++export const MULTIPART_OVERHEAD_BYTES = 256 * 1024;
++
++/** Max PDF pages we will read. Extra pages are ignored (response is flagged `truncated`). */
++export const MAX_PDF_PAGES = 500;
++
++/** Soft time budget for PDF text extraction. Extra pages are ignored once exceeded. */
++export const EXTRACT_TIME_BUDGET_MS = 20_000;
++
++/**
++ * Max characters of study text we accept or return.
++ * NOTE: the syllabus prompt currently only reads the first 80,000 characters,
++ * so this is intentionally generous.
++ */
++export const MAX_STUDY_TEXT_CHARS = 300_000;
++
++/** Max JSON body size for routes that receive study text (UTF-8 can be up to 4 bytes/char). */
++export const MAX_TEXT_BODY_BYTES = 1_500_000;
++
++/** Max JSON body size for routes that receive a single stage (small objects). */
++export const MAX_STAGE_BODY_BYTES = 100_000;
+diff --git a/src/lib/api/rateLimit.ts b/src/lib/api/rateLimit.ts
+new file mode 100644
+index 0000000..86009dc
+--- /dev/null
++++ b/src/lib/api/rateLimit.ts
+@@ -0,0 +1,68 @@
++/**
++ * Fixed-window, in-memory rate limiter keyed by route + client IP.
++ *
++ * LIMITATIONS (be aware before relying on it in production):
++ * - State lives in this server process. On serverless platforms each instance
++ *   keeps its own counters, so the real limit is "per instance". It still stops
++ *   casual abuse; for strict limits use a shared store (e.g. Upstash Redis).
++ * - The client IP comes from `x-forwarded-for`. That is only trustworthy behind a
++ *   proxy/platform that sets or overwrites it (e.g. Vercel). Behind anything
++ *   else, clients can spoof it.
++ * - Students sharing one network (a school) share one IP, so raise
++ *   RATE_LIMIT_PER_MINUTE if legitimate users get blocked.
++ */
++
++const WINDOW_MS = 60_000;
++const DEFAULT_LIMIT_PER_MINUTE = 30;
++const SWEEP_THRESHOLD = 5_000;
++
++interface Bucket {
++    count: number;
++    resetAt: number;
++}
++
++// Stored on globalThis so dev-server hot reloads don't reset the counters.
++const globalStore = globalThis as unknown as { __rqRateBuckets?: Map<string, Bucket> };
++const buckets: Map<string, Bucket> = (globalStore.__rqRateBuckets ??= new Map());
++
++function limitPerMinute(): number {
++    const parsed = Number.parseInt(process.env.RATE_LIMIT_PER_MINUTE ?? '', 10);
++    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LIMIT_PER_MINUTE;
++}
++
++export function getClientIp(req: Request): string {
++    const forwarded = req.headers.get('x-forwarded-for');
++    if (forwarded) {
++        const first = forwarded.split(',')[0]?.trim();
++        if (first) return first;
++    }
++    return req.headers.get('x-real-ip')?.trim() || 'unknown';
++}
++
++function sweepExpired(now: number): void {
++    for (const [key, bucket] of buckets) {
++        if (bucket.resetAt <= now) buckets.delete(key);
++    }
++}
++
++export type RateLimitResult = { ok: true } | { ok: false; retryAfterSeconds: number };
++
++export function checkRateLimit(req: Request, routeKey: string): RateLimitResult {
++    const now = Date.now();
++    if (buckets.size > SWEEP_THRESHOLD) sweepExpired(now);
++
++    const key = `${routeKey}:${getClientIp(req)}`;
++    const bucket = buckets.get(key);
++
++    if (!bucket || bucket.resetAt <= now) {
++        buckets.set(key, { count: 1, resetAt: now + WINDOW_MS });
++        return { ok: true };
++    }
++
++    if (bucket.count >= limitPerMinute()) {
++        return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
++    }
++
++    bucket.count += 1;
++    return { ok: true };
++}
+diff --git a/src/lib/api/schemas.ts b/src/lib/api/schemas.ts
+new file mode 100644
+index 0000000..81386b0
+--- /dev/null
++++ b/src/lib/api/schemas.ts
+@@ -0,0 +1,37 @@
++import { z } from 'zod';
++import { MAX_STUDY_TEXT_CHARS } from './limits';
++
++/** Request-body schemas for the API routes. Bounded so clients can't send huge or malformed payloads. */
++
++export const QuizTypeSchema = z.enum(['multiple-choice', 'true-false', 'enumeration']);
++
++const studyText = z
++    .string()
++    .max(MAX_STUDY_TEXT_CHARS)
++    .refine((text) => text.trim().length >= 30, 'Insufficient study text.');
++
++export const SyllabusRequestSchema = z.object({
++    text: studyText,
++});
++
++export const GenerateRequestSchema = z.object({
++    text: studyText,
++    quizType: QuizTypeSchema,
++});
++
++const StageItemRequestSchema = z.object({
++    term: z.string().max(500),
++    description: z.string().max(2000),
++});
++
++export const GenerateStageRequestSchema = z.object({
++    stage: z.object({
++        stageIndex: z.number(),
++        title: z.string().max(300),
++        enemyId: z.string().max(64).default('vanguard_scout'),
++        summary: z.string().max(1000).optional(),
++        items: z.array(StageItemRequestSchema).min(1).max(50),
++    }),
++    // Matches previous behavior: missing quizType falls back to multiple-choice.
++    quizType: QuizTypeSchema.default('multiple-choice'),
++});
+diff --git a/src/lib/logger.ts b/src/lib/logger.ts
+new file mode 100644
+index 0000000..2452126
+--- /dev/null
++++ b/src/lib/logger.ts
+@@ -0,0 +1,9 @@
++/**
++ * Dev-only logging. Verbose "status banner" logs stay out of production
++ * server logs. Use console.error directly for real failures.
++ */
++const isDev = process.env.NODE_ENV !== 'production';
++
++export function devLog(...args: unknown[]): void {
++    if (isDev) console.log(...args);
++}

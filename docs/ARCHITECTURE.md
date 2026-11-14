@@ -13,10 +13,13 @@ ReviewQuest uses feature-first organization with a layered separation, so logic,
 | Data / schemas | `src/lib/schemas.ts` | Zod schemas as the single source of truth for entities. |
 | Infrastructure | `src/lib/multiAiClient.ts`, `src/lib/supabase.ts` | External clients and environment boundaries. |
 | Routes | `src/app/api/*` | Thin HTTP handlers that call the service layer. |
+| API guards | `src/lib/api/*` | Shared request handling: rate limiting, size limits, Zod request schemas, error responses. |
 
 ## Request flow
 
-1. **`/api/extract`**: the uploaded PDF is parsed server-side with `pdfjs-dist`, and the text is normalized.
+Every API route first runs the shared guards in `src/lib/api`: **rate limit → size-limited body read → JSON parse → Zod validation**. Only then does it call a service.
+
+1. **`/api/extract`**: the uploaded PDF is verified by its magic bytes, parsed server-side with `pdfjs-dist`, and the text is normalized and capped.
 2. **`/api/syllabus`**: the text is split into sub-topics (one per floor).
 3. **`/api/generate` / `/api/generate-stage`**: AI generates the boss and its questions for the chosen quiz type.
 4. **`multiAiClient`** sends each request to Gemini, falling back to Groq and then OpenRouter on failure or timeout.
