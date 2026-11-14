@@ -71,7 +71,8 @@ export const generateQuizFromContent = async (
 
         // 3. Logic Layer: AI Transmission
         const response = await openai.chat.completions.create({
-            model: "google/gemini-2.0-flash-001",
+            model: process.env.AI_MODEL || "google/gemini-2.5-flash-lite",
+            max_tokens: 2000,
             messages: [
                 { role: "system", content: "You are a JSON-only tactical engine. You adapt study materials into RPG combat encounters." },
                 { role: "user", content: prompt }

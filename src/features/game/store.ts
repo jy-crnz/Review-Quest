@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Quiz, type PetType, DungeonData, Level } from '@/lib/schemas';
+import { Quiz, type PetType, DungeonData, Level, type ReviewerSyllabus, type QuizQuestion } from '@/lib/schemas';
+import { isKindAnswerMatch } from '@/lib/answerMatcher';
 
 // --- Engineering Standards: Balancing Constants ---
 const XP_PER_CORRECT_ANSWER = 20;
@@ -145,10 +146,26 @@ interface GameState {
     pendingLevelUp: boolean;
     showBriefing: boolean; // NEW: Story state
 
+    // 🗺️ PROGRESSIVE STAGE INGESTION (Just-In-Time Architecture)
+    currentSyllabus: ReviewerSyllabus | null;
+    currentStageIndex: number;
+    isStudyingStage: boolean;
+    activeQuizType: QuizType;
+    stageQuestionsCache: Record<number, QuizQuestion[]>;
+
     // Actions
+    setSyllabus: (syllabus: ReviewerSyllabus, quizType: QuizType) => void;
+    startStageCombat: (questions: QuizQuestion[]) => void;
+    advanceToNextStage: () => void;
+    repeatCurrentStage: () => void;
+    setStageIndex: (index: number) => void;
+    cancelStageStudy: () => void;
+    clearStageQuestionsCache: () => void;
+
     setPendingText: (text: string | null) => void;
     setQuiz: (quiz: DungeonData, quizType: QuizType) => void;
     nextLevel: () => void;
+    repeatFloor: () => void;
     setPetType: (type: PetType) => void;
     setPlayerName: (name: string) => void;
     updateAppearance: (look: Partial<CharacterAppearance>) => void;
@@ -163,6 +180,7 @@ interface GameState {
     endRun: (reason: 'defeated' | 'abandoned' | 'victory') => void;
     upgradeStat: (statType: 'attack' | 'defense') => void;
     closeLevelUp: () => void;
+    openBriefing: () => void;
     closeBriefing: () => void; // NEW: Story action
     collectRewards: () => void;
     resetGame: () => void;
@@ -286,6 +304,13 @@ export const useGameStore = create<GameState>()(
             showLevelUp: false,
             pendingLevelUp: false,
 
+            // Progressive Ingestion (JIT Architecture)
+            currentSyllabus: null,
+            currentStageIndex: 0,
+            isStudyingStage: false,
+            activeQuizType: 'multiple-choice',
+            stageQuestionsCache: {},
+
             // --- Actions ---
             setPlayerName: (name) => set({ playerName: name }),
             updateAppearance: (look) => set((state) => ({
@@ -356,6 +381,218 @@ export const useGameStore = create<GameState>()(
                 };
             }),
 
+            setSyllabus: (syllabus, quizType) => {
+                const subject = (syllabus.title || '').toLowerCase();
+                let detected: CourseType = 'default';
+                if (subject.match(/it|computer|tech|code|software|programming|system|information/)) detected = 'it';
+                else if (subject.match(/nurse|nurs|med|health|clinic|patient|doctor|biolog/)) detected = 'nursing';
+                else if (subject.match(/engin|mech|struct|civil|blueprint|math|physics/)) detected = 'engineering';
+                else if (subject.match(/law|poly|consti|legal|court|justice|rizal|kasaysayan/)) detected = 'law';
+
+                const newDungeonId = `dungeon-${Date.now()}`;
+                const min = NODE_PADDING;
+                const max = CANVAS_SIZE - NODE_PADDING;
+                const safeX = Math.floor(Math.random() * (max - min + 1)) + min;
+                const safeY = Math.floor(Math.random() * (max - min + 1)) + min;
+
+                const newNode: DungeonNode = {
+                    id: newDungeonId,
+                    name: syllabus.title || 'Target Sector',
+                    subject: detected,
+                    quizType: quizType,
+                    status: 'available',
+                    position: { x: safeX, y: safeY },
+                    levelRequired: get().level,
+                    lastClearedAt: null,
+                    stability: 100
+                };
+
+                set((state) => ({
+                    currentSyllabus: syllabus,
+                    currentStageIndex: 0,
+                    isStudyingStage: true,
+                    activeQuizType: quizType,
+                    stageQuestionsCache: {},
+                    pendingExtractedText: null,
+                    activeDungeonId: newDungeonId,
+                    dungeons: [...state.dungeons, newNode],
+                    courseType: detected,
+                    currentQuiz: null,
+                    isLevelComplete: false,
+                    isGameOver: false,
+                    isBossSlain: false,
+                    wrongAnswers: [],
+                    sessionStats: { questionsCorrect: 0, questionsAttempted: 0, totalDamageDealt: 0 },
+                    sessionLoot: null
+                }));
+            },
+
+            startStageCombat: (questions) => {
+                const state = get();
+                if (!state.currentSyllabus) return;
+                const currentStage = state.currentSyllabus.stages[state.currentStageIndex];
+                if (!currentStage) return;
+
+                const currentAtk = state.stats.attack;
+                const weapon = state.recipes.find(r => r.type === 'weapon' && r.targetId === state.appearance.weaponId);
+                const weaponAtk = weapon?.bonuses.attack || 0;
+                const waveHP = Math.floor((questions.length * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.85);
+
+                const currentLevel: Level = {
+                    id: `stage-${state.currentStageIndex}`,
+                    topicName: currentStage.title,
+                    enemyId: currentStage.enemyId || 'vanguard_scout',
+                    summary: currentStage.summary || '',
+                    keyConcepts: currentStage.items.map(it => `${it.term}: ${it.description}`),
+                    questions: questions
+                };
+
+                const dungeonData: DungeonData = {
+                    title: state.currentSyllabus.title,
+                    summary: state.currentSyllabus.summary,
+                    levels: [currentLevel]
+                };
+
+                set({
+                    currentQuiz: dungeonData,
+                    currentLevelIndex: 0,
+                    currentQuestionIndex: 0,
+                    isStudyingStage: false,
+                    isLevelComplete: false,
+                    isGameOver: false,
+                    isBossSlain: false,
+                    playerHP: PLAYER_HEALTH_POOL,
+                    bossHP: waveHP,
+                    maxBossHP: waveHP,
+                    bossName: currentStage.title,
+                    bossQuote: currentStage.summary || 'Prepare for evaluation.',
+                    mapNodes: questions.map((_, idx) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
+                    combo: 0,
+                    ultimateCharge: 0,
+                    stageQuestionsCache: {
+                        ...state.stageQuestionsCache,
+                        [state.currentStageIndex]: questions
+                    }
+                });
+            },
+
+            advanceToNextStage: () => {
+                const state = get();
+                if (!state.currentSyllabus) return;
+
+                const nextIdx = state.currentStageIndex + 1;
+                if (nextIdx < state.currentSyllabus.stages.length) {
+                    set({
+                        currentStageIndex: nextIdx,
+                        isStudyingStage: true,
+                        isLevelComplete: false,
+                        currentQuiz: null
+                    });
+                } else {
+                    get().clearActiveDungeon();
+                    const lootDrop: Partial<LootInventory> = {
+                        hardened_plate: Math.floor(Math.random() * 5) + 3,
+                        neural_link: 2,
+                        data_shard: Math.floor(Math.random() * 4) + 2,
+                        power_core: 1
+                    };
+                    set((s) => ({
+                        isGameOver: true,
+                        isBossSlain: true,
+                        isLevelComplete: false,
+                        currentXP: s.currentXP + VICTORY_BONUS_XP * 2,
+                        sessionLoot: lootDrop,
+                        runSummary: { reason: 'victory', stats: s.sessionStats },
+                        isStudyingStage: false
+                    }));
+                }
+            },
+
+            repeatCurrentStage: () => {
+                const state = get();
+                if (!state.currentSyllabus) return;
+
+                const currentStage = state.currentSyllabus.stages[state.currentStageIndex];
+                if (!currentStage) return;
+
+                // ⚡ INSTANT REPLAY: Retrieve existing questions from cache or currentQuiz
+                const cachedQuestions = state.stageQuestionsCache[state.currentStageIndex]
+                    || state.currentQuiz?.levels[0]?.questions;
+
+                if (cachedQuestions && cachedQuestions.length > 0) {
+                    const currentAtk = state.stats.attack;
+                    const weapon = state.recipes.find(r => r.type === 'weapon' && r.targetId === state.appearance.weaponId);
+                    const weaponAtk = weapon?.bonuses.attack || 0;
+                    const waveHP = Math.floor((cachedQuestions.length * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.85);
+
+                    const currentLevel: Level = {
+                        id: `stage-${state.currentStageIndex}`,
+                        topicName: currentStage.title,
+                        enemyId: currentStage.enemyId || 'vanguard_scout',
+                        summary: currentStage.summary || '',
+                        keyConcepts: currentStage.items.map(it => `${it.term}: ${it.description}`),
+                        questions: cachedQuestions
+                    };
+
+                    const dungeonData: DungeonData = {
+                        title: state.currentSyllabus.title,
+                        summary: state.currentSyllabus.summary,
+                        levels: [currentLevel]
+                    };
+
+                    set({
+                        currentQuiz: dungeonData,
+                        currentLevelIndex: 0,
+                        currentQuestionIndex: 0,
+                        isStudyingStage: false,
+                        isLevelComplete: false,
+                        isGameOver: false,
+                        isBossSlain: false,
+                        playerHP: PLAYER_HEALTH_POOL,
+                        bossHP: waveHP,
+                        maxBossHP: waveHP,
+                        bossName: currentStage.title,
+                        bossQuote: currentStage.summary || 'Prepare for evaluation.',
+                        mapNodes: cachedQuestions.map((_, idx) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
+                        combo: 0,
+                        ultimateCharge: 0
+                    });
+                } else {
+                    set({
+                        isStudyingStage: true,
+                        isLevelComplete: false,
+                        currentQuiz: null,
+                        playerHP: PLAYER_HEALTH_POOL,
+                        combo: 0,
+                        ultimateCharge: 0
+                    });
+                }
+            },
+
+            clearStageQuestionsCache: () => set({ stageQuestionsCache: {} }),
+
+            setStageIndex: (index: number) => {
+                const state = get();
+                if (!state.currentSyllabus) return;
+                if (index >= 0 && index < state.currentSyllabus.stages.length) {
+                    set({
+                        currentStageIndex: index,
+                        isStudyingStage: true,
+                        isLevelComplete: false,
+                        currentQuiz: null
+                    });
+                }
+            },
+
+            cancelStageStudy: () => set({
+                currentSyllabus: null,
+                currentStageIndex: 0,
+                isStudyingStage: false,
+                activeDungeonId: null,
+                currentQuiz: null,
+                stageQuestionsCache: {}
+            }),
+
             setQuiz: (quiz, quizType) => {
                 const subject = (quiz.title || '').toLowerCase();
                 let detected: CourseType = 'default';
@@ -385,20 +622,19 @@ export const useGameStore = create<GameState>()(
                 const currentAtk = get().stats.attack;
                 const weapon = get().recipes.find(r => r.type === 'weapon' && r.targetId === get().appearance.weaponId);
                 const weaponAtk = weapon?.bonuses.attack || 0;
-                const waveHP = Math.floor((5 * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.8);
-                
                 const firstLevel = quiz.levels[0];
+                const waveHP = Math.floor((firstLevel.questions.length * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.85);
 
                 set((state) => ({
                     activeDungeonId: newDungeonId, dungeons: [...state.dungeons, newNode],
                     currentQuiz: quiz, courseType: detected, currentLevelIndex: 0, isLevelComplete: false,
                     mapNodes: firstLevel.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
-                    pendingExtractedText: null, bossName: `Floor 1: ${firstLevel.topicName}`, bossQuote: 'Prepare for evaluation.',
+                    pendingExtractedText: null, bossName: `Floor 1: ${firstLevel.topicName}`, bossQuote: firstLevel.summary || 'Prepare for evaluation.',
                     currentWaveIndex: 0, playerHP: PLAYER_HEALTH_POOL, bossHP: waveHP, maxBossHP: waveHP,
                     currentQuestionIndex: 0, combo: 0, ultimateCharge: 0,
                     sessionStats: { questionsCorrect: 0, questionsAttempted: 0, totalDamageDealt: 0 },
                     wrongAnswers: [], showResults: false, sessionLoot: null, isGameOver: false, isBossSlain: false,
-                    showBriefing: true, // TRIGGER STORY BRIEFING
+                    showBriefing: true, // TRIGGER STORY BRIEFING & INTEL DOSSIER
                 }));
             },
 
@@ -412,17 +648,42 @@ export const useGameStore = create<GameState>()(
                 const currentAtk = state.stats.attack;
                 const weapon = state.recipes.find(r => r.type === 'weapon' && r.targetId === state.appearance.weaponId);
                 const weaponAtk = weapon?.bonuses.attack || 0;
-                // Scale HP slightly for next level
-                const waveHP = Math.floor((5 * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * (0.8 + nextLvlIdx * 0.2));
+                // Scale HP dynamically with number of questions on this floor
+                const waveHP = Math.floor((nextLevelData.questions.length * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * (0.85 + nextLvlIdx * 0.1));
 
                 return {
                     currentLevelIndex: nextLvlIdx,
                     isLevelComplete: false,
                     currentQuestionIndex: 0,
                     bossName: `Floor ${nextLvlIdx + 1}: ${nextLevelData.topicName}`,
+                    bossQuote: nextLevelData.summary || 'Commencing sector challenge.',
                     bossHP: waveHP,
                     maxBossHP: waveHP,
                     mapNodes: nextLevelData.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' })),
+                };
+            }),
+
+            repeatFloor: () => set((state) => {
+                if (!state.currentQuiz) return state;
+                const currentLevelData = state.currentQuiz.levels[state.currentLevelIndex];
+                if (!currentLevelData) return state;
+
+                const currentAtk = state.stats.attack;
+                const weapon = state.recipes.find(r => r.type === 'weapon' && r.targetId === state.appearance.weaponId);
+                const weaponAtk = weapon?.bonuses.attack || 0;
+                const waveHP = Math.floor((currentLevelData.questions.length * (BASE_DAMAGE_TO_BOSS + (currentAtk * 5) + weaponAtk)) * 0.85);
+
+                return {
+                    isLevelComplete: false,
+                    currentQuestionIndex: 0,
+                    playerHP: PLAYER_HEALTH_POOL,
+                    bossHP: waveHP,
+                    maxBossHP: waveHP,
+                    combo: 0,
+                    ultimateCharge: 0,
+                    bossName: `Floor ${state.currentLevelIndex + 1}: ${currentLevelData.topicName}`,
+                    bossQuote: currentLevelData.summary || 'Commencing sector challenge.',
+                    mapNodes: currentLevelData.questions.map((_: any, idx: number) => ({ id: idx, status: idx === 0 ? 'current' : 'upcoming' }))
                 };
             }),
 
@@ -435,11 +696,21 @@ export const useGameStore = create<GameState>()(
                 const quizType = activeDungeon?.quizType || 'multiple-choice';
 
                 let isCorrect = false;
+                const explanation = (currentQuestion as any).explanation || '';
                 if (quizType === 'enumeration') {
-                    isCorrect = String(answer).toLowerCase().trim() === currentQuestion.options[currentQuestion.correctIdx].toLowerCase().trim();
+                    const targetAnswer = currentQuestion.options[currentQuestion.correctIdx] || '';
+                    const accepted = currentQuestion.acceptedAnswers || [];
+                    isCorrect = isKindAnswerMatch(String(answer), targetAnswer, accepted, explanation);
                 } else {
                     isCorrect = answer === currentQuestion.correctIdx;
                 }
+
+                // 🎯 OPTION A: ACTIVE RECALL MASTERY LOOP
+                // If incorrect, log mistake AND re-queue this exact question to the end of the floor's question pool.
+                // The floor (and entire material) will NOT finish until every question is mastered!
+                let updatedQuestions = currentLevel.questions;
+                let updatedQuiz = state.currentQuiz;
+                let updatedMapNodes = state.mapNodes;
 
                 if (!isCorrect) {
                     state.logMistake({
@@ -448,6 +719,15 @@ export const useGameStore = create<GameState>()(
                         correctChoice: currentQuestion.options[currentQuestion.correctIdx],
                         rationale: (currentQuestion as any).explanation
                     });
+
+                    // Clone missed question to the end of the floor queue
+                    const reQueuedQuestion = { ...currentQuestion };
+                    updatedQuestions = [...currentLevel.questions, reQueuedQuestion];
+                    const updatedLevels = state.currentQuiz.levels.map((lvl, idx) =>
+                        idx === state.currentLevelIndex ? { ...lvl, questions: updatedQuestions } : lvl
+                    );
+                    updatedQuiz = { ...state.currentQuiz, levels: updatedLevels };
+                    updatedMapNodes = [...state.mapNodes, { id: updatedQuestions.length - 1, status: 'upcoming' as const }];
                 }
 
                 const equippedArmor = state.recipes.find(r => r.type === 'armor' && r.targetId === state.appearance.armorId);
@@ -460,13 +740,18 @@ export const useGameStore = create<GameState>()(
                 const comboMultiplier = 1 + (Math.floor(nextCombo / 3) * 0.1);
 
                 let finalDamage = isCorrect ? Math.floor((BASE_DAMAGE_TO_BOSS + (state.stats.attack * 5) + bonusAtk) * comboMultiplier) : 0;
-                const isLastQuestion = state.currentQuestionIndex === currentLevel.questions.length - 1;
+                const isLastQuestion = state.currentQuestionIndex === updatedQuestions.length - 1;
                 if (isLastQuestion && isCorrect) finalDamage = state.bossHP;
 
                 const damageToPlayer = isCorrect ? 0 : Math.max(5, BASE_DAMAGE_TO_PLAYER - (state.stats.defense * 2) - bonusDef);
 
                 const nextBossHP = Math.max(0, state.bossHP - finalDamage);
-                const nextPlayerHP = Math.max(0, state.playerHP - damageToPlayer);
+                
+                // 🛡️ CONTINUOUS PLAY PROTOCOL: Emergency Shield Reboot
+                // Instead of premature game-over terminating the run, reboot shields to 50 HP so all questions are encountered and mastered!
+                const rawPlayerHP = state.playerHP - damageToPlayer;
+                const nextPlayerHP = rawPlayerHP <= 0 ? 50 : rawPlayerHP;
+
                 const nextQuestionIndex = state.currentQuestionIndex + 1;
 
                 let activeWaveIdx = state.currentWaveIndex;
@@ -476,13 +761,19 @@ export const useGameStore = create<GameState>()(
                 let activeMaxHP = state.maxBossHP;
 
                 if ((nextBossHP <= 0 || nextQuestionIndex === 5 || nextQuestionIndex === 10) && !isLastQuestion) {
-                    activeWaveIdx = Math.min(activeWaveIdx + 1, WAVES.length - 1);
-                    const nextEnemy = WAVES[activeWaveIdx];
-                    activeBossName = (activeWaveIdx >= 3) ? nextEnemy.title : `Wave ${activeWaveIdx + 1}: ${nextEnemy.title}`;
-                    activeBossQuote = nextEnemy.quote;
-                    const newWaveHP = Math.floor((BASE_DAMAGE_TO_BOSS + (state.stats.attack * 5) + bonusAtk) * (3.5 + (activeWaveIdx * 0.5)));
-                    activeHP = newWaveHP;
-                    activeMaxHP = newWaveHP;
+                    if (state.currentSyllabus) {
+                        const newWaveHP = Math.floor((BASE_DAMAGE_TO_BOSS + (state.stats.attack * 5) + bonusAtk) * (3.5 + (activeWaveIdx * 0.5)));
+                        activeHP = newWaveHP;
+                        activeMaxHP = newWaveHP;
+                    } else {
+                        activeWaveIdx = Math.min(activeWaveIdx + 1, WAVES.length - 1);
+                        const nextEnemy = WAVES[activeWaveIdx];
+                        activeBossName = (activeWaveIdx >= 3) ? nextEnemy.title : `Wave ${activeWaveIdx + 1}: ${nextEnemy.title}`;
+                        activeBossQuote = nextEnemy.quote;
+                        const newWaveHP = Math.floor((BASE_DAMAGE_TO_BOSS + (state.stats.attack * 5) + bonusAtk) * (3.5 + (activeWaveIdx * 0.5)));
+                        activeHP = newWaveHP;
+                        activeMaxHP = newWaveHP;
+                    }
                 }
 
                 const updatedStats = {
@@ -494,18 +785,12 @@ export const useGameStore = create<GameState>()(
                 const nextXP = state.currentXP + (isCorrect ? XP_PER_CORRECT_ANSWER : 0);
                 const nextLevelStats = Math.floor(nextXP / 100) + 1;
 
-                if (nextPlayerHP <= 0) {
-                    return {
-                        playerHP: 0, bossHP: 0, isGameOver: true, isBossSlain: false,
-                        currentXP: nextXP, level: nextLevelStats,
-                        sessionStats: updatedStats, sessionLoot: {},
-                        runSummary: { reason: 'defeated', stats: updatedStats }
-                    };
-                }
-                
-                if (isLastQuestion) {
-                    const isFinalLevel = state.currentLevelIndex === state.currentQuiz.levels.length - 1;
+                // Floor completion: only when the last question (including any re-queued retries) is correctly cleared!
+                if (isLastQuestion && isCorrect) {
+                    const isSyllabusRun = !!state.currentSyllabus;
+                    const isFinalLevel = !isSyllabusRun && (state.currentLevelIndex === updatedQuiz.levels.length - 1);
                     if (isFinalLevel) {
+                        // 🏆 100% COMPLETE: All questions across the entire document are cleared and mastered!
                         get().clearActiveDungeon();
                         const lootDrop: Partial<LootInventory> = {
                             hardened_plate: Math.floor(Math.random() * 3) + 1,
@@ -514,6 +799,7 @@ export const useGameStore = create<GameState>()(
                             power_core: Math.random() > 0.8 ? 1 : 0
                         };
                         return {
+                            currentQuiz: updatedQuiz,
                             playerHP: nextPlayerHP, bossHP: 0, isGameOver: true, isBossSlain: true,
                             currentXP: nextXP + VICTORY_BONUS_XP, level: nextLevelStats,
                             sessionStats: updatedStats, sessionLoot: lootDrop,
@@ -521,19 +807,24 @@ export const useGameStore = create<GameState>()(
                             isLevelComplete: true
                         };
                     } else {
+                        // Advance to next floor OR complete stage in progressive syllabus run
                         return {
+                            currentQuiz: updatedQuiz,
                             playerHP: nextPlayerHP, bossHP: 0, isLevelComplete: true,
-                            currentQuestionIndex: state.currentQuestionIndex, // keep it at last
+                            isGameOver: false, isBossSlain: false,
+                            currentQuestionIndex: state.currentQuestionIndex,
                             combo: nextCombo, maxCombo: Math.max(state.maxCombo, nextCombo),
                             ultimateCharge: isCorrect ? Math.min(100, state.ultimateCharge + (5 + nextCombo * 2)) : state.ultimateCharge,
                             currentXP: nextXP, level: nextLevelStats, sessionStats: updatedStats,
                             skillPoints: nextLevelStats > state.level ? state.skillPoints + 1 : state.skillPoints,
                             pendingLevelUp: nextLevelStats > state.level || state.pendingLevelUp,
+                            mapNodes: updatedMapNodes.map(n => ({ ...n, status: 'cleared' as const }))
                         };
                     }
                 }
 
                 return {
+                    currentQuiz: updatedQuiz,
                     bossHP: activeHP, maxBossHP: activeMaxHP, bossName: activeBossName, bossQuote: activeBossQuote,
                     currentWaveIndex: activeWaveIdx, playerHP: nextPlayerHP, currentQuestionIndex: nextQuestionIndex,
                     combo: nextCombo, maxCombo: Math.max(state.maxCombo, nextCombo),
@@ -541,7 +832,7 @@ export const useGameStore = create<GameState>()(
                     currentXP: nextXP, level: nextLevelStats, sessionStats: updatedStats,
                     skillPoints: nextLevelStats > state.level ? state.skillPoints + 1 : state.skillPoints,
                     pendingLevelUp: nextLevelStats > state.level || state.pendingLevelUp,
-                    mapNodes: state.mapNodes.map((n, i) => i <= state.currentQuestionIndex ? { ...n, status: 'cleared' as const } : i === nextQuestionIndex ? { ...n, status: 'current' as const } : n)
+                    mapNodes: updatedMapNodes.map((n, i) => i <= state.currentQuestionIndex ? { ...n, status: 'cleared' as const } : i === nextQuestionIndex ? { ...n, status: 'current' as const } : n)
                 };
             }),
 
@@ -563,6 +854,7 @@ export const useGameStore = create<GameState>()(
             ),
 
             closeLevelUp: () => set({ showLevelUp: false }),
+            openBriefing: () => set({ showBriefing: true }),
             closeBriefing: () => set({ showBriefing: false }),
 
             collectRewards: () => {
@@ -571,7 +863,8 @@ export const useGameStore = create<GameState>()(
                 set({
                     playerHP: PLAYER_HEALTH_POOL, isGameOver: false, runSummary: null, currentQuiz: null,
                     activeDungeonId: null, mapNodes: [], currentWaveIndex: 0, wrongAnswers: [],
-                    showResults: false, sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0
+                    showResults: false, sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0,
+                    currentSyllabus: null, currentStageIndex: 0, isStudyingStage: false
                 });
             },
 
@@ -579,7 +872,9 @@ export const useGameStore = create<GameState>()(
                 playerHP: PLAYER_HEALTH_POOL, currentQuestionIndex: 0, combo: 0, ultimateCharge: 0,
                 isGameOver: false, isBossSlain: false, pendingExtractedText: null, currentQuiz: null,
                 mapNodes: [], currentWaveIndex: 0, dungeons: [], wrongAnswers: [], showResults: false,
-                sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0
+                sessionLoot: null, isLevelComplete: false, currentLevelIndex: 0,
+                currentSyllabus: null, currentStageIndex: 0, isStudyingStage: false,
+                stageQuestionsCache: {}
             }),
         }),
         {

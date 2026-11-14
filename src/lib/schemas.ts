@@ -22,6 +22,8 @@ export const QuizQuestionSchema = z.object({
     options: z.array(z.string()).length(4),
     correctIdx: z.number().min(0).max(3),
     explanation: z.string().optional(),
+    acceptedAnswers: z.array(z.string()).optional(),
+    hint: z.string().optional(),
 });
 
 export const UserSchema = z.object({
@@ -40,13 +42,43 @@ export const LevelSchema = z.object({
     id: z.string(),
     topicName: z.string(),
     enemyId: z.string(),
+    summary: z.string().optional(),
+    keyConcepts: z.array(z.string()).default([]),
     questions: z.array(QuizQuestionSchema),
 });
 
 export const DungeonDataSchema = z.object({
     title: z.string(),
+    summary: z.string().optional(),
     levels: z.array(LevelSchema),
 });
+
+/**
+ * 🗺️ PROGRESSIVE INGESTION SCHEMAS (Just-In-Time Architecture)
+ * Deconstructs uploaded reviewers into sequential study stages and terms.
+ */
+export const ReviewerItemSchema = z.object({
+    term: z.string(),
+    description: z.string(),
+});
+
+export const ReviewerStageSchema = z.object({
+    stageIndex: z.number(),
+    title: z.string(),
+    enemyId: z.string().default('vanguard_scout'),
+    summary: z.string().optional(),
+    items: z.array(ReviewerItemSchema),
+});
+
+export const ReviewerSyllabusSchema = z.object({
+    title: z.string(),
+    summary: z.string().optional(),
+    stages: z.array(ReviewerStageSchema),
+});
+
+export type ReviewerItem = z.infer<typeof ReviewerItemSchema>;
+export type ReviewerStage = z.infer<typeof ReviewerStageSchema>;
+export type ReviewerSyllabus = z.infer<typeof ReviewerSyllabusSchema>;
 
 export const QuizSchema = z.object({
     ...baseEntity,

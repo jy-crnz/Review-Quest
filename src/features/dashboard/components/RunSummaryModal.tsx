@@ -26,6 +26,10 @@ export const RunSummaryModal = () => {
                             <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
                                 <Skull className="w-8 h-8 text-red-500" />
                             </div>
+                        ) : reason === 'victory' ? (
+                            <div className="p-4 bg-yellow-500/10 rounded-full border border-yellow-500/20">
+                                <Trophy className="w-8 h-8 text-yellow-500" />
+                            </div>
                         ) : (
                             <div className="p-4 bg-blue-500/10 rounded-full border border-blue-500/20">
                                 <RotateCcw className="w-8 h-8 text-blue-400" />
@@ -33,7 +37,7 @@ export const RunSummaryModal = () => {
                         )}
                     </div>
                     <h2 className="text-3xl font-black italic tracking-tighter text-white uppercase">
-                        {reason === 'defeated' ? 'Quest Failed' : 'Review Interrupted'}
+                        {reason === 'defeated' ? 'Quest Failed' : reason === 'victory' ? 'Campaign Cleared' : 'Review Interrupted'}
                     </h2>
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.3em]">Session Performance Log</p>
                 </div>

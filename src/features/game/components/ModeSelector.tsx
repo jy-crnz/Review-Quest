@@ -11,7 +11,7 @@ import { useGameStore, type QuizType } from '../store';
  * Features: Integrated loading states, RPG-tier hover juice, and API synchronization.
  */
 export const ModeSelector = () => {
-    const { pendingExtractedText, setQuiz } = useGameStore();
+    const { pendingExtractedText, setSyllabus } = useGameStore();
     const [loading, setLoading] = useState<QuizType | null>(null);
 
     const startEncounter = async (type: QuizType) => {
@@ -19,20 +19,25 @@ export const ModeSelector = () => {
         setLoading(type);
 
         try {
-            const response = await fetch('/api/generate', {
+            const response = await fetch('/api/syllabus', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: pendingExtractedText, quizType: type }),
+                body: JSON.stringify({ text: pendingExtractedText }),
             });
 
             const data = await response.json();
-            if (!response.ok) throw new Error(data.error);
+            if (!response.ok) {
+                const errorMessage = typeof data.error === 'string' 
+                    ? data.error 
+                    : (data.error?.message || "Failed to extract study syllabus.");
+                throw new Error(errorMessage);
+            }
 
-            // 🎯 Success: Generates the procedural node and starts battle
-            setQuiz(data, type);
-        } catch (err) {
+            // 🎯 Success: Loads the progressive syllabus and enters Stage 1 Study Screen!
+            setSyllabus(data, type);
+        } catch (err: any) {
             console.error("Uplink Error:", err);
-            alert("The AI Boss jammed the frequency. Re-initialize scan.");
+            alert(err?.message || "The AI Boss jammed the frequency. Re-initialize scan.");
         } finally {
             setLoading(null);
         }

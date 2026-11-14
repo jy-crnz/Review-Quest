@@ -13,6 +13,7 @@ import { useGameStore } from '@/features/game/store';
 // 🛡️ ARCHITECTURE: Feature-First Components
 import { FileUpload } from '@/features/upload/components/FileUpload';
 import { ModeSelector } from '@/features/game/components/ModeSelector';
+import { StageStudyScreen } from '@/features/game/components/StageStudyScreen';
 import { BattleScreen } from '@/features/game/components/BattleScreen';
 import { ExperienceBar } from '@/features/dashboard/components/ExperienceBar';
 import { StudyBuffs } from '@/features/dashboard/components/StudyBuffs';
@@ -46,7 +47,9 @@ export default function Home() {
     playerName,
     activeDungeonId,
     dungeons,
-    pendingExtractedText
+    pendingExtractedText,
+    isStudyingStage,
+    currentSyllabus
   } = useGameStore();
 
   const [activeTab, setActiveTab] = useState<'map' | 'char' | 'forge' | 'swap'>('map');
@@ -215,8 +218,11 @@ export default function Home() {
         </div>
 
         {!currentQuiz ? (
-          /* --- PHASE 1: EXPLORATION & MANAGEMENT --- */
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 flex-1 flex flex-col">
+          isStudyingStage && currentSyllabus ? (
+            <StageStudyScreen />
+          ) : (
+            /* --- PHASE 1: EXPLORATION & MANAGEMENT --- */
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 flex-1 flex flex-col">
 
             {isGameOver ? (
               <motion.div
@@ -414,6 +420,7 @@ export default function Home() {
               </motion.div>
             )}
           </div>
+          )
         ) : (
           /* --- PHASE 2: COMBAT DEPLOYMENT (BATTLE ACTIVE) --- */
           <motion.div

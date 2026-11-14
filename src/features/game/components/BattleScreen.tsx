@@ -22,9 +22,17 @@ import {
     Terminal,
     Swords,
     ShieldCheck,
-    Sparkles
+    Sparkles,
+    ChevronRight,
+    Lightbulb,
+    Cat,
+    Dog,
+    Bird,
+    Egg,
+    HelpCircle
 } from 'lucide-react';
 import { useGameStore } from '../store';
+import { isKindAnswerMatch } from '@/lib/answerMatcher';
 
 // 🛡️ ARCHITECTURE: Feature-First modular components
 import { StudyBuddy } from './StudyBuddy';
@@ -43,7 +51,9 @@ export const BattleScreen = () => {
         isBossSlain, isGameOver, wrongAnswers, showInGameMap, playerName,
         showResults, setShowResults, recipes, appearance, showBriefing, courseType,
         handleAnswer, useUltimate, toggleInGameMap, endRun, collectRewards, resetGame,
-        currentLevelIndex, isLevelComplete, nextLevel
+        currentLevelIndex, isLevelComplete, nextLevel, repeatFloor, openBriefing,
+        currentSyllabus, currentStageIndex, advanceToNextStage, repeatCurrentStage,
+        selectedPet
     } = useGameStore();
 
     const [screenEffect, setScreenEffect] = useState<'hit' | 'damage' | 'none'>('none');
@@ -51,12 +61,16 @@ export const BattleScreen = () => {
     const [damageNumber, setDamageNumber] = useState<{ val: number; id: number; isUlt?: boolean } | null>(null);
     const [showTelemetry, setShowTelemetry] = useState(false);
 
+    const [showHint, setShowHint] = useState<boolean>(false);
+    const [eliminatedOptions, setEliminatedOptions] = useState<number[]>([]);
+
     const bossHPPercentage = Math.max(0, (bossHP / maxBossHP) * 100);
     const isPhaseTwo = bossHPPercentage < 50;
     const isPhaseCritical = bossHPPercentage < 20;
 
     const [isAnimating, setIsAnimating] = useState(false);
     const [isConfirmingRetreat, setIsConfirmingRetreat] = useState(false);
+    const [answerFeedback, setAnswerFeedback] = useState<{ isCorrect: boolean; explanation: string } | null>(null);
 
     const activeDungeon = dungeons.find(d => d.id === activeDungeonId);
     const challengeType = activeDungeon?.quizType || 'multiple-choice';
@@ -64,6 +78,100 @@ export const BattleScreen = () => {
     const currentQuestion = currentLevel?.questions[currentQuestionIndex];
 
     const progress = currentLevel ? ((currentQuestionIndex + 1) / currentLevel.questions.length) * 100 : 0;
+
+    // Reset Hint and Lifelines on Question / Floor change
+    useEffect(() => {
+        setShowHint(false);
+        setEliminatedOptions([]);
+    }, [currentQuestionIndex, currentLevelIndex]);
+
+    const PetIcon = useMemo(() => {
+        switch (selectedPet) {
+            case 'dog': return Dog;
+            case 'bird': return Bird;
+            case 'owl': return Egg;
+            default: return Cat;
+        }
+    }, [selectedPet]);
+
+    const playHintSound = () => {
+        const soundMap: Record<string, string> = {
+            cat: '/assets/audio/pet/purr.mp3',
+            dog: '/assets/audio/pet/bark.mp3',
+            bird: '/assets/audio/pet/chirp.mp3',
+            owl: '/assets/audio/pet/owlchirp.mp3',
+        };
+        try {
+            const soundFile = soundMap[selectedPet] || '/assets/audio/pet/chirp.mp3';
+            const audio = new Audio(soundFile);
+            audio.volume = 0.3;
+            audio.play().catch(() => {});
+        } catch {
+            // ignore audio restriction errors
+        }
+    };
+
+    const handleToggleHint = () => {
+        if (!showHint) {
+            playHintSound();
+        }
+        setShowHint(prev => !prev);
+    };
+
+    const handleUse5050 = () => {
+        if (!currentQuestion || challengeType !== 'multiple-choice') return;
+        if (eliminatedOptions.length > 0) return;
+
+        const wrongIndices = currentQuestion.options
+            .map((opt, idx) => ({ opt, idx }))
+            .filter(item => item.opt && item.opt.trim() !== '' && item.idx !== currentQuestion.correctIdx)
+            .map(item => item.idx);
+
+        const shuffled = [...wrongIndices].sort(() => 0.5 - Math.random());
+        const toEliminate = shuffled.slice(0, 2);
+        setEliminatedOptions(toEliminate);
+    };
+
+    const hintData = useMemo(() => {
+        if (!currentQuestion) return null;
+
+        const rawHint = (currentQuestion as any).hint?.trim();
+        const correctAnswerText = currentQuestion.options[currentQuestion.correctIdx] || '';
+
+        let letterClue = '';
+        let wordCountClue = '';
+
+        if (challengeType === 'enumeration') {
+            const targetWords = correctAnswerText.split(/\s+/).filter(Boolean);
+            const firstLetter = correctAnswerText.charAt(0).toUpperCase();
+            letterClue = `Nagsisimula sa letrang: "${firstLetter}..."`;
+            wordCountClue = `${targetWords.length} ${targetWords.length === 1 ? 'salita' : 'mga salita'} (${correctAnswerText.length} titik)`;
+        }
+
+        let clueText = rawHint;
+        if (!clueText) {
+            if (challengeType === 'true-false') {
+                clueText = currentQuestion.explanation
+                    ? `Pansinin: Suriin kung may mga salita o detalye sa pangungusap na sadyang binago o pinalitan kaugnay ng paksa.`
+                    : `Suriing maigi ang buong pahayag bago magpasya kung ito ay totoo o gawa-gawa.`;
+            } else if (challengeType === 'enumeration') {
+                clueText = currentQuestion.explanation
+                    ? `May kaugnayan ito sa: ${currentQuestion.explanation.replace(/^[Ii]to ang\s*/, '')}`
+                    : `Tandaan ang mga terminolohiya, tao, o pangyayaring tinalakay sa seksyong ito.`;
+            } else {
+                clueText = currentQuestion.explanation
+                    ? `Pahiwatig: Pag-isipan ang konteksto kaugnay ng: ${currentQuestion.explanation.replace(/^[Ii]to ang\s*/, '')}`
+                    : `Basahing mabuti ang bawat opsyon at piliin ang pinakatumpak sa tinalakay sa aralin.`;
+            }
+        }
+
+        return {
+            clueText,
+            letterClue,
+            wordCountClue,
+            targetAnswer: correctAnswerText
+        };
+    }, [currentQuestion, challengeType]);
 
     const equippedBonuses = useMemo(() => {
         const armor = recipes.find(r => r.type === 'armor' && r.targetId === appearance.armorId);
@@ -88,10 +196,17 @@ export const BattleScreen = () => {
         setIsAnimating(true);
 
         let isCorrect = false;
+        const explanation = (currentQuestion as any).explanation || '';
         if (challengeType === 'enumeration') {
-            isCorrect = String(answer).toLowerCase().trim() === currentQuestion.options[currentQuestion.correctIdx].toLowerCase().trim();
+            const targetAnswer = currentQuestion.options[currentQuestion.correctIdx] || '';
+            const accepted = currentQuestion.acceptedAnswers || [];
+            isCorrect = isKindAnswerMatch(String(answer), targetAnswer, accepted, explanation);
         } else {
             isCorrect = answer === currentQuestion.correctIdx;
+        }
+
+        if (explanation) {
+            setAnswerFeedback({ isCorrect, explanation });
         }
 
         if (isCorrect) {
@@ -106,19 +221,20 @@ export const BattleScreen = () => {
             setDamageNumber({ val: totalDmg, id: Date.now() });
             setScreenEffect('hit');
 
-            await new Promise(res => setTimeout(res, 600));
+            await new Promise(res => setTimeout(res, 800));
         } else {
             setScreenEffect('damage');
-            await new Promise(res => setTimeout(res, 400));
+            await new Promise(res => setTimeout(res, 1800));
         }
 
         handleAnswer(answer);
+        setAnswerFeedback(null);
 
         setTimeout(() => {
             setIsAnimating(false);
             setDamageNumber(null);
             setScreenEffect('none');
-        }, 400);
+        }, 300);
     };
 
     const onActivateUltimate = async () => {
@@ -193,21 +309,49 @@ export const BattleScreen = () => {
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.9, opacity: 0 }}
-                            className="text-center space-y-6"
+                            className="relative bg-slate-900 border border-slate-800 p-8 sm:p-10 rounded-4xl shadow-2xl max-w-md w-full text-center space-y-6"
                         >
-                            <RefreshCcw className="w-16 h-16 text-blue-500 animate-spin mx-auto" />
-                            <h2 className="text-4xl font-black italic tracking-tighter text-white uppercase mb-2">
-                                Sector Cleared
-                            </h2>
-                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">
-                                Descending to Next Floor
-                            </p>
-                            <button
-                                onClick={nextLevel}
-                                className="px-8 py-4 bg-blue-600 hover:bg-blue-500 text-white font-black uppercase tracking-widest text-sm rounded-2xl cursor-pointer transition-all shadow-[0_0_20px_rgba(37,99,235,0.5)] active:scale-95"
-                            >
-                                Initiate Floor {currentLevelIndex + 2}
-                            </button>
+                            <CheckCircle2 className="w-16 h-16 text-emerald-400 mx-auto animate-bounce" />
+                            <div>
+                                <h2 className="text-3xl sm:text-4xl font-black italic tracking-tighter text-white uppercase mb-2">
+                                    {currentSyllabus ? `Stage ${currentStageIndex + 1} Cleared!` : "Sector Cleared!"}
+                                </h2>
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                    {currentSyllabus && currentStageIndex < currentSyllabus.stages.length - 1
+                                        ? `Next Up: ${currentSyllabus.stages[currentStageIndex + 1]?.title}`
+                                        : "Curriculum Objectives Mastered"}
+                                </p>
+                            </div>
+
+                            <div className="flex flex-col gap-3 pt-2">
+                                {/* Proceed to Next Stage */}
+                                <button
+                                    onClick={currentSyllabus ? advanceToNextStage : nextLevel}
+                                    className="w-full py-4 bg-linear-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-black uppercase tracking-widest text-xs rounded-2xl cursor-pointer transition-all shadow-[0_0_30px_rgba(37,99,235,0.4)] active:scale-95 flex items-center justify-center gap-2"
+                                >
+                                    <span>
+                                        {currentSyllabus && currentStageIndex < currentSyllabus.stages.length - 1
+                                            ? `Proceed to Stage ${currentStageIndex + 2}`
+                                            : currentSyllabus
+                                            ? "Claim Campaign Victory"
+                                            : `Initiate Floor ${currentLevelIndex + 2}`}
+                                    </span>
+                                    <ChevronRight className="w-4 h-4" />
+                                </button>
+
+                                {/* Retake / Repeat Current Stage */}
+                                <button
+                                    onClick={currentSyllabus ? repeatCurrentStage : repeatFloor}
+                                    className="w-full py-4 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white font-black uppercase tracking-widest text-xs rounded-2xl border border-slate-700/80 transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-2 shadow-lg"
+                                >
+                                    <RotateCcw className="w-4 h-4 text-amber-400" />
+                                    <span>
+                                        {currentSyllabus
+                                            ? `Retake Stage ${currentStageIndex + 1}`
+                                            : `Retake Floor ${currentLevelIndex + 1}`}
+                                    </span>
+                                </button>
+                            </div>
                         </motion.div>
                     </div>
                 )}
@@ -292,14 +436,31 @@ export const BattleScreen = () => {
                         </div>
                     </div>
 
-                    <div className="flex justify-center">
+                    <div className="flex justify-center items-center gap-2">
                         <button
                             onClick={toggleInGameMap}
-                            className={`group flex items-center gap-2 px-4 py-1.5 rounded-full border-2 font-black text-[9px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer 
+                            className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-full border font-black text-[9px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer 
                                 ${showInGameMap ? 'bg-white text-black border-white shadow-lg' : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-600'}`}
                         >
                             <MapIcon className={`w-3 h-3 ${showInGameMap ? 'animate-pulse' : ''}`} />
-                            {showInGameMap ? 'Viewing Intel' : 'Mission Status'}
+                            {showInGameMap ? 'Viewing Map' : 'Map'}
+                        </button>
+                        <button
+                            onClick={openBriefing}
+                            className="group flex items-center gap-1.5 px-3 py-1.5 rounded-full border font-black text-[9px] uppercase tracking-widest bg-blue-950/40 text-blue-300 border-blue-800/60 hover:bg-blue-900/50 hover:border-blue-500 transition-all active:scale-95 cursor-pointer shadow-sm"
+                        >
+                            <BookOpen className="w-3 h-3 text-blue-400" />
+                            Study Notes
+                        </button>
+                        <button
+                            onClick={handleToggleHint}
+                            className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-full border font-black text-[9px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer shadow-sm
+                                ${showHint 
+                                    ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-[0_0_15px_rgba(251,191,36,0.4)]' 
+                                    : 'bg-amber-950/40 text-amber-300 border-amber-800/60 hover:bg-amber-900/50 hover:border-amber-500'}`}
+                        >
+                            <Lightbulb className={`w-3 h-3 ${showHint ? 'animate-bounce text-slate-950 fill-current' : 'text-amber-400'}`} />
+                            {showHint ? 'Hide Hint' : 'Hint'}
                         </button>
                     </div>
 
@@ -312,7 +473,11 @@ export const BattleScreen = () => {
                 <div className="relative pt-2">
                     <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-slate-950 border border-slate-800 rounded-full flex items-center gap-2 z-10 shadow-xl">
                         <Target className="w-2.5 h-2.5 course-text" />
-                        <span className="text-[8px] font-black uppercase text-slate-400 tracking-widest leading-none">Floor Progress</span>
+                        <span className="text-[8px] font-black uppercase text-slate-300 tracking-widest leading-none">
+                            {currentSyllabus
+                                ? `Stage ${currentStageIndex + 1}/${currentSyllabus.stages.length} • Q${currentQuestionIndex + 1}/${currentLevel.questions.length}`
+                                : `Floor ${currentLevelIndex + 1}/${currentQuiz.levels.length} • Q${currentQuestionIndex + 1}/${currentLevel.questions.length}`}
+                        </span>
                     </div>
                     <div className="w-full h-1 bg-slate-800/50 rounded-full overflow-hidden">
                         <div
@@ -422,6 +587,122 @@ export const BattleScreen = () => {
                         {currentQuestion.q}
                     </p>
 
+                    {/* Hint Button Prompt (when hint is not open) */}
+                    {!showHint && !answerFeedback && (
+                        <div className="mt-4 flex justify-center">
+                            <button
+                                type="button"
+                                onClick={handleToggleHint}
+                                className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 hover:text-amber-200 text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer shadow-sm group"
+                            >
+                                <Lightbulb className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 group-hover:rotate-12 transition-transform" />
+                                <span>Clueless? Tap for a Hint</span>
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Interactive Animated Hint Card */}
+                    <AnimatePresence>
+                        {showHint && !answerFeedback && (
+                            <motion.div
+                                initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -8, scale: 0.98 }}
+                                className="mt-5 p-4 sm:p-5 rounded-3xl bg-linear-to-r from-amber-950/70 via-slate-900/90 to-amber-950/70 border border-amber-500/40 shadow-[0_0_25px_rgba(245,158,11,0.15)] text-left backdrop-blur-md relative"
+                            >
+                                <div className="flex items-center justify-between pb-2.5 border-b border-amber-500/20">
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="p-2 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-400">
+                                            <PetIcon className="w-4 h-4" />
+                                        </div>
+                                        <div>
+                                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-300 flex items-center gap-1.5">
+                                                <Sparkles className="w-3 h-3 text-amber-400" />
+                                                Study Buddy's Clue
+                                            </p>
+                                            <p className="text-[8px] font-bold uppercase tracking-wider text-amber-400/60">
+                                                {selectedPet.toUpperCase()} COMPANION WHISPER
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowHint(false)}
+                                        className="p-1 rounded-lg text-amber-400/70 hover:text-amber-200 hover:bg-amber-500/10 transition-colors cursor-pointer"
+                                        title="Dismiss Hint"
+                                    >
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+
+                                <div className="pt-3 space-y-3">
+                                    <p className="text-xs font-semibold leading-relaxed text-amber-100 flex items-start gap-2.5">
+                                        <span className="text-amber-400 font-black text-sm select-none shrink-0">💡</span>
+                                        <span>{hintData?.clueText}</span>
+                                    </p>
+
+                                    {challengeType === 'enumeration' && hintData && (
+                                        <div className="flex flex-wrap items-center gap-2 pt-1 text-[10px] font-bold">
+                                            {hintData.letterClue && (
+                                                <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-300">
+                                                    {hintData.letterClue}
+                                                </span>
+                                            )}
+                                            {hintData.wordCountClue && (
+                                                <span className="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300">
+                                                    {hintData.wordCountClue}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {challengeType === 'multiple-choice' && (
+                                        <div className="pt-1 flex flex-wrap items-center justify-between gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={handleUse5050}
+                                                disabled={eliminatedOptions.length > 0}
+                                                className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-all cursor-pointer ${
+                                                    eliminatedOptions.length > 0
+                                                        ? 'bg-amber-950/40 border border-amber-800/40 text-amber-400/50 cursor-not-allowed'
+                                                        : 'bg-amber-500 text-slate-950 hover:bg-amber-400 active:scale-95 shadow-[0_0_15px_rgba(245,158,11,0.3)]'
+                                                }`}
+                                            >
+                                                <Zap className="w-3 h-3 fill-current" />
+                                                {eliminatedOptions.length > 0 ? '✓ 2 Wrong Choices Eliminated' : '50/50 Lifeline (Eliminate 2)'}
+                                            </button>
+                                            <span className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">
+                                                Tactical Lifeline
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    <AnimatePresence>
+                        {answerFeedback && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -10, scale: 0.98 }}
+                                className={`mt-4 p-4 rounded-2xl border text-center transition-all ${
+                                    answerFeedback.isCorrect
+                                        ? 'bg-emerald-950/80 border-emerald-500/50 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.2)]'
+                                        : 'bg-red-950/90 border-red-500/60 text-red-200 shadow-[0_0_25px_rgba(239,68,68,0.3)]'
+                                }`}
+                            >
+                                <div className="text-[11px] font-black uppercase tracking-wider mb-1 flex items-center justify-center gap-1.5">
+                                    {answerFeedback.isCorrect ? '✓ Wasto! Critical Strike' : '❌ Mali! System Damage Taken'}
+                                </div>
+                                <p className="text-xs font-semibold leading-relaxed text-slate-100">
+                                    {answerFeedback.explanation}
+                                </p>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
                     <AnimatePresence>
                         {xpPopup && (
                             <motion.div
@@ -451,6 +732,26 @@ export const BattleScreen = () => {
                     <div className={`grid gap-3 ${challengeType === 'true-false' ? 'grid-cols-2 max-w-sm mx-auto' : 'grid-cols-1 md:grid-cols-2'}`}>
                         {currentQuestion.options.map((option, idx) => {
                             if (!option || option.trim() === '') return null;
+                            const isEliminated = challengeType === 'multiple-choice' && eliminatedOptions.includes(idx);
+
+                            if (isEliminated) {
+                                return (
+                                    <button
+                                        key={idx}
+                                        disabled={true}
+                                        className="p-5 rounded-2xl border text-left opacity-25 line-through grayscale border-red-950/40 bg-slate-950/60 text-slate-600 cursor-not-allowed shadow-none relative overflow-hidden transition-all"
+                                    >
+                                        <span className="inline-block w-5 text-[10px] font-black text-slate-700 uppercase mr-2">
+                                            0{idx + 1}
+                                        </span>
+                                        {option}
+                                        <span className="ml-2 text-[9px] font-black text-red-500 uppercase tracking-widest no-underline">
+                                            [ELIMINATED]
+                                        </span>
+                                    </button>
+                                );
+                            }
+
                             return (
                                 <button
                                     key={idx}

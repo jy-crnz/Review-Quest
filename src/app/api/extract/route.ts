@@ -22,6 +22,35 @@ if (typeof window === 'undefined') {
  */
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
+/**
+ * TEXT LAYOUT NORMALIZATION
+ * Cleans raw extracted PDF text for downstream processing:
+ * - De-hyphenates line-break word splits
+ * - Strips common header/footer patterns
+ * - Standardizes bullet markers
+ * - Collapses multi-column whitespace artifacts
+ * - Collapses excessive blank lines
+ */
+function normalizeExtractedText(text: string): string {
+    // De-hyphenate line-break splits: e.g. "hyphen-\nated" → "hyphenated"
+    text = text.replace(/(\w)-\s*\n\s*(\w)/g, '$1$2');
+
+    // Strip common header/footer patterns (page numbers, download banners, URLs)
+    text = text.replace(/^(Page \d+( of \d+)?|Downloaded by.*|www\..+\.com.*)$/gmi, '');
+
+    // Standardize bullet markers to a uniform "• " prefix
+    text = text.replace(/^[ \t]*[•●○*▪]\s*/gm, '• ');
+
+    // Collapse 3+ consecutive spaces/tabs to a newline (handles multi-column layouts)
+    text = text.replace(/[ \t]{3,}/g, '\n');
+
+    // Collapse 3+ consecutive blank lines down to two newlines
+    text = text.replace(/\n{3,}/g, '\n\n');
+
+    // Trim leading/trailing whitespace
+    return text.trim();
+}
+
 export async function POST(req: Request) {
     try {
         // 🎯 LOGIC: We use formData here because the FileUpload sends a physical file.
@@ -74,10 +103,13 @@ export async function POST(req: Request) {
         // 🔍 Console Log: ReviewQuest Engine Status
         console.log(`\n--- [SCANNER SUCCESS: ${pdf.numPages} PAGES EXTRACTED] ---`);
 
+        // Normalize the raw extracted text before validation
+        extractedText = normalizeExtractedText(extractedText);
+
         // 4. Content Validation
         if (!extractedText || extractedText.trim().length < 50) {
             return NextResponse.json(
-                { error: 'No extractable text found. Ensure the document is not an image-only scan.' },
+                { error: 'This PDF appears to be a scanned image with no selectable text. Please upload a text-based PDF or a typed document.' },
                 { status: 400 }
             );
         }
